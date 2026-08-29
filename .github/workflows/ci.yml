@@ -21,10 +21,14 @@ jobs:
       # jsonschema — preflight.py's schema gate. Without it preflight reports
       #              "jsonschema not installed" and the P1-7 closed-island schema is
       #              never actually enforced anywhere. CI is where that gets proven.
-      - name: Install QA dependencies
-        run: pip install pyyaml jinja2 jsonschema
-      - name: QA suite
+      # Versions pinned in requirements.txt — the single source of truth (BUC-9).
+      - name: Install bundle Python deps
+        run: pip install -r requirements.txt
+      - name: QA suite (Role 3 — tooling & adapters)
         run: bash tests/run-qa.sh
+      - name: QA suite (validation layer — validate.py, fallback matrix, preflight, secret scan)
+        # NSB_QA_STRICT_DEPS=1: a missing dep must fail CI, never silently skip rows.
+        run: NSB_QA_STRICT_DEPS=1 bash tests/run-validate-qa.sh
       - name: Bundle secret scan
         run: python3 scripts/secret-scan.py --root . --no-value
 

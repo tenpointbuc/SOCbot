@@ -14,6 +14,21 @@ for the [BUC-6](/BUC/issues/BUC-6) new-company deployment runbook.
 | `tests/qa_fixtures.py` | derives QA fixtures from the shipped example config + manifest (no drift) |
 | `tests/run-validate-qa.sh` | the BUC-9 self-test: proves all four success criteria, offline |
 | `tests/run-qa.sh` | Role 3 self-test (tooling/adapters/n8n) — run both in CI |
+| `requirements.txt` | the bundle's three Python deps — PyYAML, Jinja2, jsonschema |
+
+## Dependencies
+
+`pip install -r requirements.txt` before running anything. Jinja2 backs
+`render.py`; jsonschema backs the `preflight.py` schema gate. Both tools **fail
+closed** without them — a deploy never proceeds on an unvalidated config or an
+unrendered stack, so a missing dep looks like a wall of failures rather than an
+install problem.
+
+`tests/run-validate-qa.sh` therefore reports the missing dep once and `SKIP`s
+only the rows that need it, keeping every dep-free row (the fallback matrix, the
+three fail-closed cases, the regex scan) enforcing. CI installs
+`requirements.txt` and sets `NSB_QA_STRICT_DEPS=1`, which turns a missing dep
+into a hard failure — a partial run can never be reported as green there.
 
 ## `validate.py` — post-deploy checklist
 
@@ -75,15 +90,17 @@ bash tests/run-validate-qa.sh   # BUC-9: validate, none-fallback, fail-closed, s
 
 ### CI snippet
 
+Both suites plus the tracked-file scan run on every PR — see
+`.github/workflows/ci.yml`, which is the wiring below plus a gitleaks job:
+
 ```yaml
-# .github/workflows/ci.yml (or equivalent)
 qa:
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    - run: pip install pyyaml jsonschema jinja2
+    - run: pip install -r requirements.txt
     - run: bash tests/run-qa.sh
-    - run: bash tests/run-validate-qa.sh
+    - run: NSB_QA_STRICT_DEPS=1 bash tests/run-validate-qa.sh   # no silent dep skips in CI
     - run: python3 scripts/secret-scan.py --root . --no-value   # tracked-file leak gate
 ```
 
