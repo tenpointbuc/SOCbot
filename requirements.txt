@@ -1,0 +1,15 @@
+# noc-soc-bundle — Python dependencies.
+#
+# Three, deliberately. Everything else in the bundle is stdlib so a fresh host
+# can run the tooling with `apt install python3` plus this file.
+#
+#   pip install -r requirements.txt
+#
+# preflight.py and validate.py FAIL CLOSED when jsonschema/Jinja2 are absent —
+# a deploy is never allowed to proceed on an unvalidated config or an unrendered
+# stack. tests/run-validate-qa.sh reports a missing dep once and skips the rows
+# that need it; CI sets NSB_QA_STRICT_DEPS=1 to make that fatal instead.
+
+PyYAML>=6.0        # config loader (tooling/lib/config.py), site.yaml + registries
+Jinja2>=3.1        # scripts/render.py — compose/stack templating
+jsonschema>=4.0    # scripts/preflight.py — site.schema.json gate

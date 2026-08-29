@@ -15,10 +15,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install PyYAML (config.py's one dependency; present system-wide on the reference host)
-        run: pip install pyyaml
-      - name: QA suite
+      - name: Install bundle Python deps (PyYAML, Jinja2, jsonschema)
+        run: pip install -r requirements.txt
+      - name: QA suite (Role 3 — tooling & adapters)
         run: bash tests/run-qa.sh
+      - name: QA suite (validation layer — validate.py, fallback matrix, preflight, secret scan)
+        # NSB_QA_STRICT_DEPS=1: a missing dep must fail CI, never silently skip rows.
+        run: NSB_QA_STRICT_DEPS=1 bash tests/run-validate-qa.sh
       - name: Bundle secret scan
         run: python3 scripts/secret-scan.py --root . --no-value
 

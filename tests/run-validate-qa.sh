@@ -22,6 +22,41 @@ fails=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fails=$((fails+1)); }
 sec()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+skips=0
+skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; skips=$((skips+1)); }
+
+# --- Python dependency gate -------------------------------------------------
+# The bundle's Python deps are declared in requirements.txt: PyYAML (config
+# loader), Jinja2 (render.py / n8n export), jsonschema (preflight's schema
+# gate). Missing Jinja2 or jsonschema is FAIL-CLOSED inside preflight.py and
+# validate.py by design — which would surface here as a wall of confusing
+# failures rather than "you did not install the deps".
+#
+# So: report the missing dep once, SKIP the rows that cannot run without it,
+# and keep every dep-free row enforcing. In CI, where requirements.txt is
+# installed, NSB_QA_STRICT_DEPS=1 turns a missing dep back into a hard failure
+# so a broken install can never masquerade as a green run.
+have() { $PY -c "import $1" >/dev/null 2>&1; }
+HAVE_YAML=0; have yaml       && HAVE_YAML=1
+HAVE_JINJA=0; have jinja2    && HAVE_JINJA=1
+HAVE_SCHEMA=0; have jsonschema && HAVE_SCHEMA=1
+MISSING=""
+[ "$HAVE_YAML" = 1 ]   || MISSING="$MISSING PyYAML"
+[ "$HAVE_JINJA" = 1 ]  || MISSING="$MISSING Jinja2"
+[ "$HAVE_SCHEMA" = 1 ] || MISSING="$MISSING jsonschema"
+if [ -n "$MISSING" ]; then
+  if [ "${NSB_QA_STRICT_DEPS:-0}" = "1" ]; then
+    printf '\033[31mmissing Python dependencies:%s\033[0m — pip install -r requirements.txt\n' "$MISSING"
+    printf 'NSB_QA_STRICT_DEPS=1 requires a complete install; refusing to report a partial run as green.\n'
+    exit 1
+  fi
+  printf '\033[33mNOTE\033[0m missing Python dependencies:%s (pip install -r requirements.txt).\n' "$MISSING"
+  printf '     Dependent rows will SKIP. Set NSB_QA_STRICT_DEPS=1 (CI does) to make this fatal.\n'
+fi
+# PyYAML is load-bearing for every row; without it there is nothing to test.
+if [ "$HAVE_YAML" != 1 ]; then
+  printf '\033[31mPyYAML is required to run any QA row.\033[0m\n'; exit 1
+fi
 
 # Non-/tmp scratch: state.sh (correctly) refuses a state dir under /tmp, so the
 # notifier/soc checks would degrade there. $HOME is writable and non-/tmp.
@@ -45,6 +80,9 @@ qa_state_env() {
 
 # -------------------------------------------------------------------------
 sec "A. validate.py green on a fresh bring-up (offline)"
+# validate.py's "renders deploy artifacts" row shells out to render.py, which
+# needs Jinja2; without it the whole section can only report the missing dep.
+run_section_A() {
 # shellcheck disable=SC2046
 if env $(qa_state_env buckhome) \
      $PY scripts/validate.py --offline --allow-no-backup --no-color \
@@ -66,6 +104,12 @@ env $(qa_state_env buckhome) $PY scripts/validate.py --offline --allow-no-backup
     --json --secrets-dir "$SECRETS" >"$QA/validate.json" 2>/dev/null
 $PY -c "import json,sys; d=json.load(open('$QA/validate.json')); sys.exit(0 if d['pass'] and d['summary']['fail']==0 else 1)" \
   && pass "validate --json is well-formed and pass=true" || fail "validate --json malformed / not passing"
+}
+if [ "$HAVE_JINJA" = 1 ]; then
+  run_section_A
+else
+  skip "A: validate.py green on a fresh bring-up (needs Jinja2 for the render row)"
+fi
 
 # -------------------------------------------------------------------------
 sec "B. adapter none-fallback matrix"
@@ -87,15 +131,20 @@ bash adapters/proxy/none.sh add_vhost svc.home 10.0.0.9:80 >/dev/null 2>&1 \
   && pass "proxy=none no-op exit 0" || fail "proxy=none"
 $PY tooling/lib/config.py validate >/dev/null 2>&1 && pass "none-site config validates" || fail "none-site config invalid"
 # preflight accepts the none-everything site when backups are explicitly waived
-if $PY scripts/preflight.py --site "$NONE_SITE" --secrets-dir "$SECRETS" \
+# (needs jsonschema: preflight fails closed without its schema gate)
+if [ "$HAVE_SCHEMA" != 1 ]; then
+  skip "preflight passes none-site (needs jsonschema)"
+elif $PY scripts/preflight.py --site "$NONE_SITE" --secrets-dir "$SECRETS" \
       --authorized-keys-file "$AKEYS" --allow-no-backup >"$QA/pf-none.out" 2>&1; then
   pass "preflight passes none-site (--allow-no-backup)"
 else
   fail "preflight rejected none-site"; sed 's/^/      /' "$QA/pf-none.out"
 fi
-# and the whole validate checklist is green on the none-site
+# and the whole validate checklist is green on the none-site (needs Jinja2)
 # shellcheck disable=SC2046
-if env $(qa_state_env buckhome) $PY scripts/validate.py --site "$NONE_SITE" --offline \
+if [ "$HAVE_JINJA" != 1 ]; then
+  skip "validate.py green on none-site (needs Jinja2)"
+elif env $(qa_state_env buckhome) $PY scripts/validate.py --site "$NONE_SITE" --offline \
       --allow-no-backup --no-color --secrets-dir "$SECRETS" >"$QA/validate-none.out" 2>&1 \
    && grep -q 'validate: PASS' "$QA/validate-none.out"; then
   pass "validate.py green on none-site"
@@ -107,8 +156,12 @@ unset NOCSOC_CONFIG
 # -------------------------------------------------------------------------
 sec "C. preflight fail-closed cases (must fail as designed)"
 SITE="$ROOT/config/site.example.yaml"
-# control: fully provisioned -> PASS (proves each case below isolates one fault)
-if $PY scripts/preflight.py --site "$SITE" --secrets-dir "$SECRETS" \
+# control: fully provisioned -> PASS (proves each case below isolates one fault).
+# Needs jsonschema; the three fail-closed cases below do not (each trips its own
+# check before the schema gate matters), so they keep enforcing either way.
+if [ "$HAVE_SCHEMA" != 1 ]; then
+  skip "control: fully-provisioned preflight PASSes (needs jsonschema)"
+elif $PY scripts/preflight.py --site "$SITE" --secrets-dir "$SECRETS" \
       --authorized-keys-file "$AKEYS" >"$QA/pf-ok.out" 2>&1; then
   pass "control: fully-provisioned preflight PASSes"
 else
@@ -162,11 +215,24 @@ fi
 
 # value pass: render real artifacts, export workflows, then inline a backend
 # secret VALUE into one generated artifact -> value diff must flag it.
+run_value_pass() {
 REND="$QA/rendered"
-$PY scripts/render.py --site "$SITE" --out "$REND" --secrets-dir "$SECRETS" >/dev/null 2>&1
+$PY scripts/render.py --site "$SITE" --out "$REND" --secrets-dir "$SECRETS" >"$QA/render.out" 2>&1
 WF="$QA/wf-export"
-NOCSOC_CONFIG="$SITE" $PY n8n/import.py --render-only "$WF" >/dev/null 2>&1
+NOCSOC_CONFIG="$SITE" $PY n8n/import.py --render-only "$WF" >"$QA/wf.out" 2>&1
 ARTIFACTS=(--artifact "$REND" --artifact "$WF" --artifact "$QA/state")
+# The value pass only means something if the artifacts actually got generated:
+# an empty tree scans CLEAN and would report a vacuous PASS below. Assert the
+# generators produced the two files the leak test depends on before scanning.
+LEAK_TARGET="$REND/stacks/noc/docker-compose.yml"
+if [ -s "$LEAK_TARGET" ] && [ -n "$(ls -A "$WF" 2>/dev/null)" ]; then
+  pass "artifacts generated (rendered compose + exported workflows)"
+else
+  fail "artifacts NOT generated — value pass below would be vacuous"
+  sed 's/^/      render: /' "$QA/render.out" | tail -5
+  sed 's/^/      export: /' "$QA/wf.out" | tail -5
+  return 1
+fi
 # clean first
 if $PY scripts/secret-scan.py --no-regex --secrets-dir "$SECRETS" "${ARTIFACTS[@]}" >/dev/null 2>&1; then
   pass "value pass CLEAN on freshly-generated artifacts"
@@ -176,7 +242,7 @@ else
 fi
 # now inline the actual NOTIFIER_TOKEN value into the rendered compose
 LEAKVAL="$(cat "$SECRETS/NOTIFIER_TOKEN")"
-printf '\n# LEAKED: %s\n' "$LEAKVAL" >>"$REND/stacks/noc/docker-compose.yml"
+printf '\n# LEAKED: %s\n' "$LEAKVAL" >>"$LEAK_TARGET"
 if $PY scripts/secret-scan.py --no-regex --secrets-dir "$SECRETS" "${ARTIFACTS[@]}" >"$QA/scan-leak.out" 2>&1; then
   fail "value pass MISSED a backend secret inlined into a generated artifact"
 else
@@ -190,11 +256,22 @@ if grep -qF "$LEAKVAL" "$QA/scan-leak.out"; then
 else
   pass "scanner reports the leak without echoing the value"
 fi
+}
+if [ "$HAVE_JINJA" = 1 ]; then
+  run_value_pass
+else
+  skip "value pass on generated artifacts (needs Jinja2 to render compose)"
+fi
 
 # -------------------------------------------------------------------------
 printf '\n'
+if [ "$skips" -gt 0 ]; then
+  printf '\033[33m%d row(s) SKIPPED for missing deps:%s\033[0m\n' "$skips" "$MISSING"
+fi
 if [ "$fails" -eq 0 ]; then
-  printf '\033[32mALL BUC-9 QA CHECKS PASSED\033[0m\n'; exit 0
+  printf '\033[32mALL BUC-9 QA CHECKS PASSED\033[0m'
+  [ "$skips" -gt 0 ] && printf ' \033[33m(%d skipped)\033[0m' "$skips"
+  printf '\n'; exit 0
 else
   printf '\033[31m%d BUC-9 QA CHECK(S) FAILED\033[0m\n' "$fails"; exit 1
 fi
