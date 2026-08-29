@@ -2,7 +2,8 @@
 
 How the portable NOC/SOC tooling reads one runtime config and dispatches every
 vendor/hardware layer behind a swappable adapter with a `none`/degraded
-fallback. Contracts are frozen by the [BUC-3 design](../README.md) §4/§6/§7.
+fallback. Contracts are frozen by the [BUC-3 design](/BUC/issues/BUC-3#document-design)
+§4/§6/§7.
 
 ## Runtime config surface
 

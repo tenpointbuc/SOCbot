@@ -20,6 +20,12 @@ already grep-clean except deliberate meta-references; what remains is semantic w
   private repo, must be generalized or moved out before any public flip.
 - `scripts/secret-scan.py` allows example configs to carry the reference host's
   non-secret facts as documentation — revisit that exemption before going public.
+- `PIHOLE_WEBPASSWORD` has **no `optional_when`** in `config/secrets.manifest.yaml`, so
+  preflight demands it even when `dns.adapter` is `hosts`/`external` and no pihole is
+  deployed. Verified 2026-08-29 by running preflight against a fully-`none` site with an
+  empty secrets backend. Should be `optional_when: "dns.adapter != pihole"`, mirroring
+  `PROXY_NPM_PASSWORD`. Documented as a wart in `docs/RUNBOOK.md` §11 until fixed; changing
+  it touches the preflight fail-closed fixtures, so it is a code+QA change, not a one-liner.
 - Socket-proxy behavior **verified 2026-08-29**: on `lscr.io/linuxserver/socket-proxy`,
   `ALLOW_*` flags are additive allows evaluated before the `POST` rule —
   `POST=0 + ALLOW_RESTARTS=1` yields restart-only (204 restart / 403 create, tested
