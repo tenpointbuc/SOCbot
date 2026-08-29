@@ -5,7 +5,7 @@
 #   A. validate.py is green on a fresh Role-2/Role-3 bring-up (--offline)
 #   B. every adapter none-fallback row passes (firewall=none, dns=hosts,
 #      proxy=none, notifier=stdout, backup=none --allow-no-backup)
-#   C. all THREE preflight fail-closed cases fail as designed, and the fully
+#   C. all FOUR preflight fail-closed cases fail as designed, and the fully
 #      -provisioned control PASSes (proving the fixtures isolate one failure each)
 #   D. the CI secret scan: regex pass flags a planted token in a tracked file,
 #      the value pass flags a backend secret value inlined into a generated
@@ -140,6 +140,32 @@ elif $PY scripts/preflight.py --site "$NONE_SITE" --secrets-dir "$SECRETS" \
 else
   fail "preflight rejected none-site"; sed 's/^/      /' "$QA/pf-none.out"
 fi
+# BUC-16: a dns.adapter != pihole site deploys no pihole, so PIHOLE_WEBPASSWORD
+# must NOT be demanded. Asserted against a backend that OMITS the key, on the
+# report lines rather than the exit code, so the row enforces without jsonschema.
+NOPIHOLE="$QA/secrets-no-pihole"
+$PY "$FIX" populate-secrets "$NOPIHOLE" --omit PIHOLE_WEBPASSWORD >/dev/null
+$PY scripts/preflight.py --site "$NONE_SITE" --secrets-dir "$NOPIHOLE" \
+    --authorized-keys-file "$AKEYS" --allow-no-backup >"$QA/pf-nopihole.out" 2>&1
+if grep -q 'secret missing: PIHOLE_WEBPASSWORD' "$QA/pf-nopihole.out"; then
+  fail "dns=hosts site still demands PIHOLE_WEBPASSWORD (optional_when not honored)"
+  sed 's/^/      /' "$QA/pf-nopihole.out"
+elif grep -q 'secret PIHOLE_WEBPASSWORD not required (optional_when' "$QA/pf-nopihole.out"; then
+  pass "dns=hosts: PIHOLE_WEBPASSWORD waived by optional_when"
+else
+  fail "preflight reported neither demand nor waiver for PIHOLE_WEBPASSWORD"
+  sed 's/^/      /' "$QA/pf-nopihole.out"
+fi
+# ...and the whole gate is still green on that site with the key absent.
+if [ "$HAVE_SCHEMA" != 1 ]; then
+  skip "preflight passes dns=hosts site with PIHOLE_WEBPASSWORD absent (needs jsonschema)"
+elif $PY scripts/preflight.py --site "$NONE_SITE" --secrets-dir "$NOPIHOLE" \
+      --authorized-keys-file "$AKEYS" --allow-no-backup >/dev/null 2>&1; then
+  pass "preflight passes dns=hosts site with PIHOLE_WEBPASSWORD absent"
+else
+  fail "preflight rejected dns=hosts site missing only PIHOLE_WEBPASSWORD"
+  sed 's/^/      /' "$QA/pf-nopihole.out"
+fi
 # and the whole validate checklist is green on the none-site (needs Jinja2)
 # shellcheck disable=SC2046
 if [ "$HAVE_JINJA" != 1 ]; then
@@ -150,6 +176,26 @@ elif env $(qa_state_env buckhome) $PY scripts/validate.py --site "$NONE_SITE" --
   pass "validate.py green on none-site"
 else
   fail "validate.py not green on none-site"; sed 's/^/      /' "$QA/validate-none.out"
+fi
+# BUC-16: preflight's waiver is only honest if the deploy really has no pihole —
+# the rendered core stack for a dns=hosts site must carry neither the service nor
+# the secret mount (otherwise `docker compose up` fails on the absent file).
+if [ "$HAVE_JINJA" != 1 ]; then
+  skip "rendered core stack drops pihole on dns=hosts (needs Jinja2)"
+else
+  RNONE="$QA/rendered-none"
+  if $PY scripts/render.py --site "$NONE_SITE" --out "$RNONE" \
+        --secrets-dir "$NOPIHOLE" >"$QA/render-none.out" 2>&1 \
+     && [ -s "$RNONE/stacks/core/docker-compose.yml" ]; then
+    if grep -q 'PIHOLE_WEBPASSWORD\|container_name: nsb-pihole' "$RNONE/stacks/core/docker-compose.yml"; then
+      fail "dns=hosts core stack still renders pihole / its secret mount"
+      grep -n 'PIHOLE_WEBPASSWORD\|nsb-pihole' "$RNONE/stacks/core/docker-compose.yml" | sed 's/^/      /'
+    else
+      pass "dns=hosts core stack renders without pihole or its secret"
+    fi
+  else
+    fail "render.py failed on the none-site"; sed 's/^/      /' "$QA/render-none.out" | tail -5
+  fi
 fi
 unset NOCSOC_CONFIG
 
@@ -196,6 +242,17 @@ else
   grep -q 'no SSH public key provisioned' "$QA/pf-c3.out" \
     && pass "case3: no SSH key fails closed" \
     || { fail "case3 failed for the wrong reason"; sed 's/^/      /' "$QA/pf-c3.out"; }
+fi
+# case 4 (BUC-16): the optional_when waiver must not become a hole — site.example
+# runs dns.adapter: pihole, so the SAME backend section B waives the key on has to
+# fail closed here. Pairs with the section-B row: waived off, demanded on.
+if $PY scripts/preflight.py --site "$SITE" --secrets-dir "$NOPIHOLE" \
+      --authorized-keys-file "$AKEYS" >"$QA/pf-c4.out" 2>&1; then
+  fail "case4 dns=pihole without PIHOLE_WEBPASSWORD did NOT fail"
+else
+  grep -q 'secret missing: PIHOLE_WEBPASSWORD' "$QA/pf-c4.out" \
+    && pass "case4: dns=pihole still fails closed without PIHOLE_WEBPASSWORD" \
+    || { fail "case4 failed for the wrong reason"; sed 's/^/      /' "$QA/pf-c4.out"; }
 fi
 
 # -------------------------------------------------------------------------

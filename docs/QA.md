@@ -26,7 +26,7 @@ install problem.
 
 `tests/run-validate-qa.sh` therefore reports the missing dep once and `SKIP`s
 only the rows that need it, keeping every dep-free row (the fallback matrix, the
-three fail-closed cases, the regex scan) enforcing. CI installs
+four fail-closed cases, the regex scan) enforcing. CI installs
 `requirements.txt` and sets `NSB_QA_STRICT_DEPS=1`, which turns a missing dep
 into a hard failure — a partial run can never be reported as green there.
 
@@ -111,9 +111,13 @@ qa:
 - **B** — the adapter `none`-fallback matrix: `firewall=none`, `dns=hosts`,
   `proxy=none`, `notifier=stdout`, `backup=none` (`--allow-no-backup`) — every
   row keeps the core NOC/SOC loop running and the whole checklist stays green.
-- **C** — all three preflight fail-closed cases fail as designed (missing
-  required secret for an enabled module; two Telegram pollers; no SSH key), while
-  a fully-provisioned control **passes** — proving each fixture isolates one fault.
+  Also that a `dns.adapter: hosts` site neither demands `PIHOLE_WEBPASSWORD`
+  (`optional_when`) nor renders a pihole service into the core stack (BUC-16).
+- **C** — all four preflight fail-closed cases fail as designed (missing
+  required secret for an enabled module; two Telegram pollers; no SSH key; a
+  `dns.adapter: pihole` site missing `PIHOLE_WEBPASSWORD`, proving the
+  `optional_when` waiver is not a hole), while a fully-provisioned control
+  **passes** — proving each fixture isolates one fault.
 - **D** — the secret scan flags a planted token in a tracked file (regex) and a
   backend secret value inlined into a generated artifact (value diff), and is
   clean on the untouched bundle + artifacts, without echoing any secret value.

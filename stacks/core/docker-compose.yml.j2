@@ -18,10 +18,12 @@ networks:
     name: socket-proxy-net
     internal: true        # no internet; sole purpose is proxied docker API
 
+{% if dns_adapter == 'pihole' %}
 secrets:
   pihole_webpassword:
     file: {{ secrets_dir }}/PIHOLE_WEBPASSWORD
 
+{% endif %}
 services:
 
   # --- docker API broker: NEVER expose the raw socket to a workload ----------
@@ -87,6 +89,10 @@ services:
       - {{ data_root }}/npm/data:/data
       - {{ data_root }}/npm/letsencrypt:/etc/letsencrypt
 
+{% if dns_adapter == 'pihole' %}
+  # Rendered ONLY for dns.adapter == pihole. On a `hosts`/`external` site no pihole
+  # is deployed, nothing consumes PIHOLE_WEBPASSWORD, and the manifest's
+  # optional_when stops preflight demanding it — the two must stay in lockstep.
   pihole:
     image: {{ images['pihole'] }}
     container_name: nsb-pihole
@@ -116,4 +122,5 @@ services:
 {% if dns_dhcp %}
     cap_add:
       - NET_ADMIN     # DHCP server needs raw sockets / bind to :67 (dns.dhcp: true)
+{% endif %}
 {% endif %}

@@ -166,16 +166,17 @@ Which keys are required is derived from your `site.yaml` (adapters + modules), p
 |---|---|---|
 | `NOTIFIER_TOKEN` | **always** | Bot token / webhook secret. Required even for `notifier.adapter: stdout`. |
 | `N8N_ENCRYPTION_KEY` | **always** | Not rotatable in place — rotating means re-provisioning every n8n credential. Generate once with `openssl rand -hex 32` and back it up **outside** the host. |
-| `PIHOLE_WEBPASSWORD` | **always** | Required even when `dns.adapter` is `hosts`/`external` (see the known wart in [§11](#11-known-warts)). |
 | `ANTHROPIC_API_KEY` | **always** | `agent_runtime` module; drives the scheduled agent jobs. |
+| `PIHOLE_WEBPASSWORD` | `dns.adapter == pihole` | Skipped otherwise (`optional_when`) — a `hosts`/`external` site renders no pihole container. |
 | `PROXY_NPM_PASSWORD` | `proxy.adapter == npm` | Skipped otherwise (`optional_when`). |
 | `RESTIC_PASSWORD`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` | `backup.adapter == restic` | Losing `RESTIC_PASSWORD` means losing the repo. Escrow it off-host. |
 | `FORTIGATE_API_TOKEN` | `firewall.adapter == fortigate` | |
 | `IMMICH_DB_PASSWORD`, `IMMICH_API_KEY` | `modules.media == true` | |
 
-> The four "always" keys are the **irreducible minimum** for the most stripped-down site
+> The three "always" keys are the **irreducible minimum** for the most stripped-down site
 > (`dns=hosts, proxy=none, firewall=none, notifier=stdout, backup=none, all modules off`).
-> Verified by running preflight against that config with an empty secrets dir.
+> Verified by running preflight against that config with an empty secrets dir; the QA
+> suite pins it (`tests/run-validate-qa.sh` §B).
 
 **Do not guess the list — let preflight tell you.** It names every missing key and the exact
 path it expected:
@@ -361,9 +362,6 @@ nothing about whether *your* `site.yaml` is right.
 Carry these into the deployment; none of them block success, but all of them will confuse you
 if you meet them cold.
 
-- **`PIHOLE_WEBPASSWORD` is required even when `dns.adapter` is not `pihole`.** The manifest
-  entry has no `optional_when`, unlike `PROXY_NPM_PASSWORD`. Provision a throwaway value.
-  Tracked in [BACKLOG.md](BACKLOG.md).
 - **Never run `ansible-playbook site.yml` directly.** The play asserts `rendered/.render-stamp`
   matches the `site.yaml` being deployed, so a direct invocation against stale or hand-edited
   artifacts fails closed. Always go through `./bootstrap.sh`, which re-renders.

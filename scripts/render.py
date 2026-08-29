@@ -261,6 +261,10 @@ def main(argv=None):
         "pin": pin,
         # pihole only gets NET_ADMIN when it actually serves DHCP (P2).
         "dns_dhcp": bool(site.get("dns", {}).get("dhcp", False)),
+        # The pihole service (and its PIHOLE_WEBPASSWORD secret mount) is rendered
+        # only for dns.adapter == pihole; `hosts`/`external` sites deploy no pihole,
+        # which is what makes the manifest's optional_when honest (BUC-16).
+        "dns_adapter": str(site.get("dns", {}).get("adapter", "pihole")),
     }
     overrides = site["security"]["images"].get("overrides", {})
     stacks = [s.strip() for s in args.stacks.split(",") if s.strip()]
