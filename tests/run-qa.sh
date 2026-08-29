@@ -63,6 +63,21 @@ if grep -rq '"pinData"\|"staticData"' "$tmpout" 2>/dev/null; then fail "pinData/
 if grep -rq '\[\[' "$tmpout" 2>/dev/null; then fail "unrendered [[ ]] params remain"; else pass "params fully rendered"; fi
 rm -rf "$tmpout"
 
+sec "6. BUC-10 provisioning hardening did not regress"
+# The P1-5 / P1-7 / P1-9 / P2 fixes live in Ansible tasks and Jinja templates that
+# cannot be executed without a target host, so these assert the structural property
+# each fix established. Two checks execute real code (render.py stamp, jsonschema
+# island rejection) and SKIP when their optional dep is absent — CI installs both.
+while IFS='|' read -r status rest; do
+  [ -n "$status" ] || continue
+  case "$status" in
+    PASS) pass "$rest" ;;
+    FAIL) fail "$rest" ;;
+    SKIP) printf '  \033[33mSKIP\033[0m %s\n' "$rest" ;;
+    *)    fail "unparsable hardening-check output: $status|$rest" ;;
+  esac
+done < <($PY tests/hardening_checks.py)
+
 printf '\n'
 if [ "$fails" -eq 0 ]; then printf '\033[32mALL QA CHECKS PASSED\033[0m\n'; exit 0
 else printf '\033[31m%d QA CHECK(S) FAILED\033[0m\n' "$fails"; exit 1; fi

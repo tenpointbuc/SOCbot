@@ -15,8 +15,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install PyYAML (config.py's one dependency; present system-wide on the reference host)
-        run: pip install pyyaml
+      # pyyaml     — config.py's one runtime dependency (system-wide on the reference host)
+      # jinja2     — render.py's compose renderer; without it the P1-5 render-stamp
+      #              check in tests/hardening_checks.py degrades to SKIP
+      # jsonschema — preflight.py's schema gate. Without it preflight reports
+      #              "jsonschema not installed" and the P1-7 closed-island schema is
+      #              never actually enforced anywhere. CI is where that gets proven.
+      - name: Install QA dependencies
+        run: pip install pyyaml jinja2 jsonschema
       - name: QA suite
         run: bash tests/run-qa.sh
       - name: Bundle secret scan
