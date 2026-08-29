@@ -1,0 +1,94 @@
+---
+# stacks role — deploy rendered compose stacks in dependency order (§10).
+# Rendering happens in bootstrap.sh (scripts/render.py) BEFORE the play; this
+# role installs the rendered artifacts and runs compose. Idempotent.
+
+- name: Ensure secrets dir exists (700) — values provisioned out-of-band, gated by preflight
+  ansible.builtin.file:
+    path: "{{ nsb_secrets_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [stacks, secrets]
+
+- name: Ensure per-service data dirs exist (with per-service ownership)
+  ansible.builtin.file:
+    path: "{{ base_data_root | default(site.site.data_root | default('/opt')) }}/{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default(item.owner | default('root')) }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ stacks_data_dirs }}"
+  loop_control:
+    label: "{{ item.path }}"
+  tags: [stacks]
+
+- name: Ensure stack deploy dirs exist
+  ansible.builtin.file:
+    path: "{{ stacks_deploy_root }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ nsb_stacks }}"
+  tags: [stacks]
+
+- name: Install rendered docker-compose.yml per stack
+  ansible.builtin.copy:
+    src: "{{ nsb_rendered_dir }}/stacks/{{ item }}/docker-compose.yml"
+    dest: "{{ stacks_deploy_root }}/{{ item }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ nsb_stacks }}"
+  tags: [stacks]
+
+# P1-5 defense-in-depth: re-assert the render-time guards against the compose that
+# was actually COPIED to the host. Binds each deployed file to the stamp's sha256
+# (so it is byte-identical to what render.py guard-checked) and re-scans for the
+# forbidden patterns (env_file / :latest-when-pinned) in case the stamp was forged.
+- name: Read the deployed compose back for guard re-assertion
+  ansible.builtin.slurp:
+    src: "{{ stacks_deploy_root }}/{{ item }}/docker-compose.yml"
+  loop: "{{ nsb_stacks }}"
+  register: nsb_deployed_compose
+  tags: [stacks]
+
+- name: Re-assert deployed compose matches the render stamp and passes guards
+  ansible.builtin.assert:
+    that:
+      # byte-for-byte identical to what render.py produced + guard-checked
+      - (item.content | b64decode | hash('sha256')) == (nsb_compose_sha256[item.item] | default(''))
+      # forbidden patterns must not survive into the deployed file
+      - "'env_file:' not in (item.content | b64decode)"
+      - (not (nsb_pin | default(true) | bool)) or (':latest' not in (item.content | b64decode))
+    fail_msg: >-
+      Deployed compose for stack '{{ item.item }}' does not match rendered/.render-stamp
+      or failed the render guards (env_file / :latest). Refusing to bring up — re-render
+      via ./bootstrap.sh instead of editing {{ stacks_deploy_root }} by hand (P1-5).
+    quiet: true
+  loop: "{{ nsb_deployed_compose.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  tags: [stacks]
+
+# Sequential (loop keeps order): core creates socket-proxy-net, then noc consumes it.
+- name: Bring up stacks in dependency order
+  community.docker.docker_compose_v2:
+    project_src: "{{ stacks_deploy_root }}/{{ item }}"
+    state: "{{ stacks_state }}"
+    pull: "{{ stacks_pull }}"
+    remove_orphans: true
+  loop: "{{ nsb_stacks }}"
+  register: stacks_up
+  tags: [stacks]
+
+- name: Show compose result summary
+  ansible.builtin.debug:
+    msg: "stack {{ item.item }}: {{ 'changed' if item.changed else 'up-to-date' }}"
+  loop: "{{ stacks_up.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: stacks_up is defined
+  tags: [stacks]

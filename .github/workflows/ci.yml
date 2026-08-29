@@ -1,0 +1,31 @@
+name: CI
+# Both jobs must pass before merge. This is the second approval gate:
+# a Slack approval alone never ships agent-written code — approval + green CI does.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: QA suite
+        run: bash tests/run-qa.sh
+      - name: Bundle secret scan
+        run: python3 scripts/secret-scan.py --root . --no-value
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

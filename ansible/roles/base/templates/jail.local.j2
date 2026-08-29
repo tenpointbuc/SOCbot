@@ -1,0 +1,15 @@
+# Managed by noc-soc-bundle (base role). fail2ban local overrides.
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+# P2: loopback-only ignoreip by default (multi-tenant safe — a noisy/compromised
+# LAN host can still be banned). Set security.fail2ban_ignore_lan: true to trust
+# the whole LAN (single-tenant posture).
+ignoreip = 127.0.0.1/8 ::1{% if site.security.fail2ban_ignore_lan | default(false) %} {{ site.network.lan_cidr }}{% endif %}
+
+backend  = systemd
+
+[sshd]
+enabled = true
+mode    = aggressive

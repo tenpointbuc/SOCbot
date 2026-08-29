@@ -1,0 +1,15 @@
+---
+# stacks role defaults.
+stacks_deploy_root: /opt/noc-soc/stacks     # where rendered compose is installed on the host
+stacks_pull: missing                        # docker_compose_v2 pull policy: missing|always|never
+stacks_state: present                       # present = up -d ; absent = down
+# data dirs to pre-create under data_root. Root-owned 0755 by default; a dir whose
+# consuming container runs as a non-root uid needs `owner` set so the container can
+# write it (n8n runs as uid 1000/node; the others run as root).
+stacks_data_dirs:
+  - { path: npm/data }
+  - { path: npm/letsencrypt }
+  - { path: pihole/etc-pihole }
+  - { path: n8n, owner: "1000", group: "1000" }
+  - { path: uptime-kuma }
+  - { path: diun }

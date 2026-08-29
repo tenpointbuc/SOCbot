@@ -1,0 +1,53 @@
+{
+  "_nocsoc": {
+    "requiresPoller": true,
+    "active": true,
+    "description": "Polls Telegram getUpdates every minute and handles the watchdog's YES/NO/MORE-LOGS buttons. This is the ONE getUpdates poller for the bot (notifier.telegram.poller must be true). Token comes from the credential, NOT $env."
+  },
+  "name": "Watchdog Approval — Poller ([[ site_id ]])",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "field": "minutes", "minutesInterval": 1 } ] }
+      },
+      "id": "trigger-1min",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [ 240, 300 ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "telegramApi",
+        "url": "https://api.telegram.org/getUpdates",
+        "sendQuery": true,
+        "queryParameters": { "parameters": [ { "name": "timeout", "value": "0" }, { "name": "allowed_updates", "value": "[\"callback_query\"]" } ] },
+        "options": {}
+      },
+      "id": "get-updates",
+      "name": "getUpdates (credential)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 460, 300 ],
+      "credentials": {
+        "telegramApi": { "name": "noc-soc notifier bot" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle callback_query button presses. Bot-global getUpdates offset is\n// persisted by n8n; only ONE workflow may own this poll (the poller rule).\n// No $env reads (N8N_BLOCK_ENV_ACCESS_IN_NODE=true).\nconst updates = ($input.first().json.result) || [];\nreturn updates.map(u => ({ json: { action: (u.callback_query && u.callback_query.data) || '', from: (u.callback_query && u.callback_query.from && u.callback_query.from.id) || null } }));"
+      },
+      "id": "handle",
+      "name": "Handle Buttons",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 680, 300 ]
+    }
+  ],
+  "connections": {
+    "Every Minute": { "main": [ [ { "node": "getUpdates (credential)", "type": "main", "index": 0 } ] ] },
+    "getUpdates (credential)": { "main": [ [ { "node": "Handle Buttons", "type": "main", "index": 0 } ] ] }
+  },
+  "settings": { "timezone": "[[ timezone ]]", "executionOrder": "v1" }
+}

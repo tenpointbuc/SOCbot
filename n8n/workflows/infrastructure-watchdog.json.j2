@@ -1,0 +1,62 @@
+{
+  "_nocsoc": {
+    "requiresPoller": false,
+    "active": true,
+    "description": "5-min container scan via socket-proxy; alerts unhealthy/exited via the notifier credential. Detect+alert only — the poller/button handler is a separate workflow."
+  },
+  "name": "Infrastructure Watchdog ([[ site_id ]])",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "field": "minutes", "minutesInterval": 5 } ] }
+      },
+      "id": "trigger-5min",
+      "name": "Every 5 Min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [ 240, 300 ]
+    },
+    {
+      "parameters": {
+        "url": "[[ socket_proxy ]]/containers/json?all=true",
+        "options": {}
+      },
+      "id": "list-containers",
+      "name": "List Containers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 460, 300 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flag containers that are unhealthy/restarting/exited/dead.\n// Reads ONLY node input (no $env — N8N_BLOCK_ENV_ACCESS_IN_NODE=true).\nconst bad = [];\nfor (const c of $input.first().json) {\n  const state = (c.State || '').toLowerCase();\n  const status = (c.Status || '').toLowerCase();\n  const name = (c.Names && c.Names[0] || '').replace(/^\\//,'');\n  if (state === 'exited' || state === 'dead' || state === 'restarting' || status.includes('unhealthy')) {\n    bad.push({ name, state, status, image: c.Image, id: (c.Id||'').slice(0,12) });\n  }\n}\nreturn bad.map(json => ({ json }));"
+      },
+      "id": "filter-unhealthy",
+      "name": "Filter Unhealthy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 680, 300 ]
+    },
+    {
+      "parameters": {
+        "chatId": "[[ telegram_group_id ]]",
+        "text": "=🔴 Container *{{ $json.name }}* is {{ $json.state }}\nimage: {{ $json.image }}\nstatus: {{ $json.status }}",
+        "additionalFields": { "message_thread_id": [[ topic_alerts ]], "parse_mode": "Markdown" }
+      },
+      "id": "alert",
+      "name": "Alert (Notifier)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [ 900, 300 ],
+      "credentials": {
+        "telegramApi": { "name": "noc-soc notifier bot" }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 Min": { "main": [ [ { "node": "List Containers", "type": "main", "index": 0 } ] ] },
+    "List Containers": { "main": [ [ { "node": "Filter Unhealthy", "type": "main", "index": 0 } ] ] },
+    "Filter Unhealthy": { "main": [ [ { "node": "Alert (Notifier)", "type": "main", "index": 0 } ] ] }
+  },
+  "settings": { "timezone": "[[ timezone ]]", "executionOrder": "v1" }
+}

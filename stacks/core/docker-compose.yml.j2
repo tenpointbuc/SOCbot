@@ -1,0 +1,119 @@
+{#- RENDERED by scripts/render.py -> DO NOT EDIT the output. Edit this template. -#}
+# noc-soc-bundle :: stack=core :: bring-up order 1/3 (§10)
+# nginx-proxy-manager, pihole, socket-proxy.
+# Security posture: granular socket-proxy gating (§8 P0-1), *_FILE secrets (§7 P0-2),
+# pinned images (§9), published ports bind to host_ip not 0.0.0.0 (§8 P1-4).
+name: nsb-core
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "{{ site.security.docker_log_caps.max_size | default('10m') }}"
+    max-file: "{{ site.security.docker_log_caps.max_file | default('3') }}"
+
+networks:
+  nsb-core:
+    name: nsb-core
+  socket-proxy-net:
+    name: socket-proxy-net
+    internal: true        # no internet; sole purpose is proxied docker API
+
+secrets:
+  pihole_webpassword:
+    file: {{ secrets_dir }}/PIHOLE_WEBPASSWORD
+
+services:
+
+  # --- docker API broker: NEVER expose the raw socket to a workload ----------
+  socket-proxy:
+    image: {{ images['socket-proxy'] }}
+    container_name: nsb-socket-proxy
+    restart: unless-stopped
+    logging: *default-logging
+    read_only: true
+    tmpfs:
+      - /run
+    networks:
+      - socket-proxy-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      LOG_LEVEL: info
+      # Granular restart gating (§8 P0-1) — an allowlist, never coarse POST=1.
+      POST: 0            # deny global POST => blocks /containers/create (no host-root bind-mount)
+      # linuxserver's granular grant: ALLOW_RESTARTS permits POST /containers/{id}/{restart,
+      # stop,kill} ONLY (the noc-engineer restart path); /containers/create + exec stay denied.
+      # NB: the var IS 'ALLOW_RESTARTS' — a bare 'RESTARTS' is silently ignored. This image
+      # (linuxserver) evaluates ALLOW_RESTARTS BEFORE the global POST deny, so it works with
+      # POST=0; tecnativa/docker-socket-proxy does NOT (deny fires first) — see images.yaml.
+      ALLOW_RESTARTS: 1
+      CONTAINERS: 1      # GET list/inspect: health checks + diun discovery
+      IMAGES: 1          # diun image-update checks
+      PING: 1
+      VERSION: 1
+      EVENTS: 1
+      # everything else denied:
+      EXEC: 0
+      NETWORKS: 0
+      VOLUMES: 0
+      SERVICES: 0
+      SWARM: 0
+      TASKS: 0
+      NODES: 0
+      SECRETS: 0
+      CONFIGS: 0
+      BUILD: 0
+      COMMIT: 0
+      SYSTEM: 0
+      AUTH: 0
+      DISTRIBUTION: 0
+      PLUGINS: 0
+      INFO: 0
+
+  nginx-proxy-manager:
+    image: {{ images['nginx-proxy-manager'] }}
+    container_name: nsb-npm
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - nsb-core
+    ports:
+      - "{{ host_ip }}:80:80"
+      - "{{ host_ip }}:443:443"
+      # admin UI binds loopback by default (P2); reach it via the proxy + auth, or
+      # set security.admin_bind to host_ip to expose it on the LAN.
+      - "{{ admin_bind }}:81:81"
+    volumes:
+      - {{ data_root }}/npm/data:/data
+      - {{ data_root }}/npm/letsencrypt:/etc/letsencrypt
+
+  pihole:
+    image: {{ images['pihole'] }}
+    container_name: nsb-pihole
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - nsb-core
+    ports:
+      - "{{ host_ip }}:53:53/tcp"
+      - "{{ host_ip }}:53:53/udp"
+      # DNS serves the LAN (host_ip); the admin web UI binds loopback by default (P2)
+      - "{{ admin_bind }}:8053:80/tcp"
+    environment:
+      TZ: {{ tz }}
+      FTLCONF_dns_listeningMode: all
+      # admin password read from a mounted file, not inlined/env_file (§7 P0-2)
+      WEBPASSWORD_FILE: /run/secrets/pihole_webpassword
+    secrets:
+      - pihole_webpassword
+    volumes:
+      - {{ data_root }}/pihole/etc-pihole:/etc/pihole
+    # Least-privilege caps (P2): drop ALL, then add back only what is needed.
+    # SYS_TIME is dropped (a container that can set the host clock is a host risk);
+    # NET_ADMIN is granted ONLY when pihole actually serves DHCP (dns.dhcp: true).
+    cap_drop:
+      - ALL
+{% if dns_dhcp %}
+    cap_add:
+      - NET_ADMIN     # DHCP server needs raw sockets / bind to :67 (dns.dhcp: true)
+{% endif %}

@@ -1,0 +1,9 @@
+{
+  "_nocsoc": { "active": true },
+  "name": "Leaky ([[ site_id ]])",
+  "nodes": [
+    { "id": "x", "name": "Send", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [0,0],
+      "parameters": { "url": "https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage" } }
+  ],
+  "connections": {}, "settings": {}
+}

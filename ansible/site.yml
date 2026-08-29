@@ -1,0 +1,121 @@
+---
+# noc-soc-bundle — top-level bring-up playbook (Role 2, BUC-7).
+# Bring-up order (§10): base hardening -> docker + networks -> core stack -> noc stack.
+# Idempotent / re-runnable. Run via bootstrap.sh (which renders artifacts first),
+# or directly:  ansible-playbook -i inventory.ini site.yml
+#
+# Non-destructive dogfood: run with --check --diff first (bootstrap --check).
+- name: noc-soc-bundle bring-up
+  hosts: noc_soc
+  become: true
+  gather_facts: true
+
+  vars:
+    nsb_bundle_root: "{{ playbook_dir | dirname }}"
+    nsb_site_config: "{{ nsb_site_config | default(nsb_bundle_root + '/config/site.example.yaml') }}"
+    nsb_rendered_dir: "{{ nsb_rendered_dir | default(nsb_bundle_root + '/rendered') }}"
+    nsb_config_dir: /etc/noc-soc
+    # nsb_stacks / nsb_secrets_dir are NOT hardcoded here — they are driven from
+    # rendered/.render-stamp in pre_tasks (P1-5) so the play can never deploy a
+    # stack set / secrets dir that diverges from what render.py actually produced
+    # and guard-checked. Fallbacks apply only if the stamp omits them.
+    nsb_secrets_dir_default: /etc/noc-soc/secrets
+    nsb_stacks_default:
+      - core
+      - noc
+
+  pre_tasks:
+    # --- P1-5 deploy-time gate: the render stamp binds this play to the exact
+    # site.yaml + VERSION + guard results that render.py produced. Running
+    # `ansible-playbook site.yml` directly against stale/hand-edited rendered/
+    # artifacts (which skipped preflight + render guards) now fails closed here.
+    - name: Load render stamp (control node)
+      ansible.builtin.slurp:
+        src: "{{ nsb_rendered_dir }}/.render-stamp"
+      delegate_to: localhost
+      become: false
+      register: nsb_stamp_raw
+
+    - name: Parse render stamp
+      ansible.builtin.set_fact:
+        nsb_stamp: "{{ nsb_stamp_raw.content | b64decode | from_json }}"
+
+    - name: Checksum the resolved site.yaml being deployed (control node)
+      ansible.builtin.stat:
+        path: "{{ nsb_site_config }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: nsb_site_stat
+
+    - name: Read bundle VERSION (control node)
+      ansible.builtin.slurp:
+        src: "{{ nsb_bundle_root }}/VERSION"
+      delegate_to: localhost
+      become: false
+      register: nsb_version_raw
+
+    - name: Assert render stamp matches the site.yaml + VERSION being deployed
+      ansible.builtin.assert:
+        that:
+          - nsb_stamp.site_sha256 is defined
+          - nsb_stamp.site_sha256 == nsb_site_stat.stat.checksum
+          - nsb_stamp.version == (nsb_version_raw.content | b64decode | trim)
+        fail_msg: >-
+          rendered/.render-stamp does not match {{ nsb_site_config }} (or VERSION).
+          Do NOT run `ansible-playbook site.yml` directly against stale artifacts —
+          re-render first via `./bootstrap.sh` (preflight -> render -> play), which
+          runs the fail-closed gate + render guards this stamp attests to (P1-5).
+        quiet: true
+
+    - name: Derive stacks + secrets dir + pin from the render stamp (single source of truth)
+      ansible.builtin.set_fact:
+        nsb_stacks: "{{ nsb_stamp.stacks | default(nsb_stacks_default) }}"
+        nsb_secrets_dir: "{{ nsb_stamp.secrets_dir | default(nsb_secrets_dir_default) }}"
+        nsb_pin: "{{ nsb_stamp.pin | default(true) }}"
+        nsb_compose_sha256: "{{ nsb_stamp.compose_sha256 | default({}) }}"
+
+    - name: Load resolved site config
+      ansible.builtin.include_vars:
+        file: "{{ nsb_site_config }}"
+        name: site
+
+    - name: Assert required config sections are present
+      ansible.builtin.assert:
+        that:
+          - site.site.id is defined
+          - site.network.host_ip is defined
+          - site.security.ssh is defined
+        fail_msg: "site.yaml is missing required sections — run scripts/preflight.py first"
+        quiet: true
+
+    - name: Ensure runtime config dir exists
+      ansible.builtin.file:
+        path: "{{ nsb_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install resolved site.yaml for runtime tooling (not world-readable, P1-7)
+      ansible.builtin.copy:
+        src: "{{ nsb_site_config }}"
+        dest: "{{ nsb_config_dir }}/site.yaml"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Install rendered site.env for shell tooling (not world-readable, P1-7)
+      ansible.builtin.copy:
+        src: "{{ nsb_rendered_dir }}/site.env"
+        dest: "{{ nsb_config_dir }}/site.env"
+        owner: root
+        group: root
+        mode: "0640"
+      when: (nsb_rendered_dir + '/site.env') is exists
+
+  roles:
+    - role: base
+      tags: [base]
+    - role: stacks
+      tags: [stacks]

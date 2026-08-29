@@ -1,0 +1,62 @@
+{
+  "_nocsoc": {
+    "requiresPoller": false,
+    "active": true,
+    "description": "Daily digest -> notifier Daily topic. Server health + DNS + alerts. Credential-typed send; no $env."
+  },
+  "name": "Morning Digest ([[ site_id ]])",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "field": "cronExpression", "expression": "0 7 * * *" } ] }
+      },
+      "id": "trigger-daily",
+      "name": "Daily 7am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [ 240, 300 ]
+    },
+    {
+      "parameters": {
+        "url": "[[ socket_proxy ]]/containers/json?all=true",
+        "options": {}
+      },
+      "id": "containers",
+      "name": "Container Count",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 460, 300 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const list = $input.first().json || [];\nconst up = list.filter(c => (c.State||'').toLowerCase() === 'running').length;\nreturn [{ json: { up, total: list.length } }];"
+      },
+      "id": "summarize",
+      "name": "Summarize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 680, 300 ]
+    },
+    {
+      "parameters": {
+        "chatId": "[[ telegram_group_id ]]",
+        "text": "=🖥️ Daily digest for [[ site_id ]]\nContainers up: {{ $json.up }}/{{ $json.total }}",
+        "additionalFields": { "message_thread_id": [[ topic_daily ]] }
+      },
+      "id": "send",
+      "name": "Send Digest (Notifier)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [ 900, 300 ],
+      "credentials": {
+        "telegramApi": { "name": "noc-soc notifier bot" }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 7am": { "main": [ [ { "node": "Container Count", "type": "main", "index": 0 } ] ] },
+    "Container Count": { "main": [ [ { "node": "Summarize", "type": "main", "index": 0 } ] ] },
+    "Summarize": { "main": [ [ { "node": "Send Digest (Notifier)", "type": "main", "index": 0 } ] ] }
+  },
+  "settings": { "timezone": "[[ timezone ]]", "executionOrder": "v1" }
+}

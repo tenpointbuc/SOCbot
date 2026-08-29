@@ -1,0 +1,80 @@
+# noc-soc-bundle — THE per-site config surface (BUC-3 design §4).
+# One annotated file per site; validated against config/site.schema.json by
+# scripts/preflight.py. Copy to config/site.yaml and edit for your host.
+# All values below are PLACEHOLDERS (RFC 5737 doc IPs, example.test domain) —
+# replace them; none identify a real deployment.
+# Secrets NEVER live here — only key *names* (see config/secrets.manifest.yaml).
+
+site:
+  id: example                     # tenant/site slug — namespaces state, backups, notifier routing
+  hostname: noc-soc-host
+  timezone: America/Chicago
+  data_root: /opt                 # per-service data under <data_root>/<service>
+  state_dir: /var/lib/noc-soc     # durable, backed up, NEVER /tmp
+
+network:
+  lan_cidr: 192.0.2.0/24
+  host_ip: 192.0.2.13             # published container ports bind to THIS ip, not 0.0.0.0 (§8 P1-4)
+  gateway: 192.0.2.1
+  local_domain: home              # <svc>.home
+  public_domain: example.test     # optional; omit if no external exposure
+  # lan6_cidr: "2001:db8::/64"    # optional IPv6 LAN prefix; omit for IPv6 default-deny (P1-9)
+
+dns:
+  adapter: pihole                 # pihole | hosts | external
+  # dhcp: false                   # true only if pihole serves DHCP (then it gets NET_ADMIN) (P2)
+proxy:
+  adapter: npm                    # npm | caddy | traefik | none
+
+firewall:
+  adapter: fortigate              # fortigate | none
+  fortigate:
+    host: 192.0.2.254
+    api_scope_ip: 192.0.2.13
+
+notifier:
+  adapter: telegram               # telegram | slack | webhook | stdout
+  telegram:
+    group_id: "-100XXXXXXXXXX"
+    topics: { alerts: 2, cameras: 4, home: 6, server: 8, daily: 10 }
+    poller: true                  # exactly-one getUpdates poller per bot (bot-global offset)
+
+backup:
+  adapter: restic                 # restic | none
+  local_repo: /mnt/backup/restic
+  offsite: { provider: b2, bucket: example-offsite-backup }
+  schedule: "0 2 * * *"
+  paths:    [ /opt, /etc/noc-soc ]
+  excludes: [ "**/ollama/models", "**/immich/thumbs" ]
+
+services:                         # machine-readable registry (was prose in HOMELAB.md)
+  - { name: n8n,          module: noc/n8n,             port: 5678, endpoints: [n8n.home],                         health: http, public: false }
+  - { name: uptime-kuma,  module: noc/uptime-kuma,     port: 3001, endpoints: [status.home],                      health: http, public: false }
+  - { name: nginx-proxy-manager, module: core/npm,     port: 81,   endpoints: [npm.home],                         health: http, public: false }
+  - { name: pihole,       module: core/pihole,         port: 8053, endpoints: [pihole.home],                      health: http, public: false }
+  - { name: immich,       module: optional/immich,     port: 2283, endpoints: [immich.home, immich.example.test], health: http, public: true }
+  - { name: vaultwarden,  module: optional/vaultwarden, port: 8222, endpoints: [vault.home, vault.example.test],  health: http, public: true, access: cloudflare }
+
+modules:                          # feature flags for optional add-ons
+  llm: true                       # ollama + open-webui
+  media: true                     # immich + ro media mounts
+  home_automation: true           # home assistant
+
+schedule:                         # agent cron (local time via site.timezone)
+  soc_triage: "15 7 * * *"
+  soc_weekly: "0 5 * * 0"
+  noc_health: "30 7 * * 1"
+
+security:
+  ssh:
+    password_auth: false
+    key_only: true
+    # permit_root: prohibit-password   # no | prohibit-password | yes (P2)
+    # allow_groups: [ ssh-users ]      # optional AllowGroups allowlist (P2)
+    # authorized_keys: [ "ssh-ed25519 AAAA... operator@laptop" ]  # or pass --authorized-keys-file to preflight
+  fail2ban: true
+  # fail2ban_ignore_lan: false    # true trusts the whole LAN (single-tenant); default loopback-only (P2)
+  # admin_bind: 192.0.2.13        # expose admin UIs (NPM/pihole/n8n/kuma) on the LAN; default 127.0.0.1 (P2)
+  docker_log_caps: { max_size: 10m, max_file: "3" }
+  images:
+    pin: true                     # forbid bare :latest in rendered compose

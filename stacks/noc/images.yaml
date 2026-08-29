@@ -1,0 +1,5 @@
+# Pinned images for the noc stack (§9). See stacks/core/images.yaml for policy.
+images:
+  n8n: n8nio/n8n:1.107.4
+  uptime-kuma: louislam/uptime-kuma:1.23.16
+  diun: crazymax/diun:4.29.0

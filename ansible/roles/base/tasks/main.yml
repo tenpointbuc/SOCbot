@@ -1,0 +1,180 @@
+---
+# base role — hardened host posture (§9). Idempotent.
+
+# ---- SSH: install keys BEFORE disabling password auth (no lockout) ----------
+- name: Assert a non-root login user is set for SSH hardening (lockout guard)
+  ansible.builtin.assert:
+    that:
+      - (base_ssh_user | length) > 0
+      - base_ssh_user != 'root'
+    fail_msg: >-
+      base_ssh_user is unset or 'root'. Set ansible_user (or base_ssh_user) to the
+      unprivileged login account in your inventory — falling back to the become
+      target (root) would install keys on root and lock out the real login (§9).
+    quiet: true
+  when: base_manage_ssh | bool
+  tags: [ssh]
+
+- name: Install operator SSH public keys (inline, if provided)
+  ansible.posix.authorized_key:
+    user: "{{ base_ssh_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ site.security.ssh.authorized_keys | default([]) }}"
+  when:
+    - base_manage_ssh | bool
+    - (site.security.ssh.authorized_keys | default([]) | length) > 0
+  tags: [ssh]
+
+- name: Read authorized_keys for the login user (empty-authorized_keys guard)
+  ansible.builtin.slurp:
+    src: "~{{ base_ssh_user }}/.ssh/authorized_keys"
+  register: base_ak
+  failed_when: false
+  changed_when: false
+  tags: [ssh]
+
+- name: Fail closed if no usable SSH public key is provisioned before hardening
+  ansible.builtin.assert:
+    that:
+      - base_ak.content is defined
+      # require at least one real pubkey line, not just a non-empty/comment-only file
+      - (base_ak.content | b64decode).splitlines()
+        | select('match', '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-ssh-)')
+        | list | length > 0
+    fail_msg: >-
+      Refusing to harden SSH: {{ base_ssh_user }}'s authorized_keys has no usable
+      public key and no inline keys were provided. Provision a key first
+      (§9 empty-authorized_keys guard).
+    quiet: true
+  when:
+    - base_manage_ssh | bool
+    - (site.security.ssh.key_only | default(true)) | bool
+  tags: [ssh]
+
+- name: Deploy SSH hardening drop-in (key-only, no password auth)
+  ansible.builtin.template:
+    src: 10-noc-soc-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-noc-soc-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+  when:
+    - base_manage_ssh | bool
+    - (site.security.ssh.key_only | default(true)) | bool
+  notify: restart sshd
+  tags: [ssh]
+
+# ---- fail2ban ---------------------------------------------------------------
+- name: Install fail2ban
+  ansible.builtin.package:
+    name: fail2ban
+    state: present
+  when: base_manage_fail2ban | bool
+  tags: [fail2ban]
+
+- name: Deploy fail2ban jail.local
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_manage_fail2ban | bool
+  notify: reload fail2ban
+  tags: [fail2ban]
+
+- name: Enable and start fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+  when: base_manage_fail2ban | bool
+  tags: [fail2ban]
+
+# ---- docker + log caps ------------------------------------------------------
+- name: Install docker engine + compose plugin
+  ansible.builtin.package:
+    name: "{{ base_docker_packages }}"
+    state: present
+  when: base_manage_docker | bool
+  tags: [docker]
+
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: base_manage_docker | bool
+  tags: [docker]
+
+- name: Deploy daemon.json with log caps (fixes unbounded json logs)
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_manage_docker | bool
+  notify: restart docker
+  tags: [docker]
+
+- name: Enable and start docker
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+  when: base_manage_docker | bool
+  tags: [docker]
+
+# ---- DOCKER-USER firewall (published ports bypass UFW — §9 P1-4) ------------
+# Durable across docker restarts via a systemd oneshot that re-applies rules
+# After=docker.service (docker resets the DOCKER-USER chain on daemon restart).
+- name: Install DOCKER-USER firewall apply script
+  ansible.builtin.template:
+    src: nsb-docker-user-firewall.sh.j2
+    dest: /usr/local/sbin/nsb-docker-user-firewall.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when: base_docker_user_firewall | bool
+  notify: apply docker-user firewall
+  tags: [firewall]
+
+- name: Install DOCKER-USER firewall systemd unit
+  ansible.builtin.template:
+    src: nsb-docker-user-firewall.service.j2
+    dest: /etc/systemd/system/nsb-docker-user-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: base_docker_user_firewall | bool
+  register: base_fw_unit
+  tags: [firewall]
+
+- name: Enable DOCKER-USER firewall unit
+  ansible.builtin.systemd:
+    name: nsb-docker-user-firewall.service
+    enabled: true
+    daemon_reload: true
+    state: started
+  when: base_docker_user_firewall | bool
+  tags: [firewall]
+
+# ---- durable state dir (never /tmp, §3/§7) ----------------------------------
+- name: Ensure per-site state dir exists (700)
+  ansible.builtin.file:
+    path: "{{ site.site.state_dir | default('/var/lib/noc-soc') }}/{{ site.site.id }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [state]
+
+# Apply log caps + firewall (handlers) BEFORE the stacks role brings containers
+# up, so containers start under the hardened daemon/firewall posture.
+- name: Flush base handlers before stack bring-up
+  ansible.builtin.meta: flush_handlers

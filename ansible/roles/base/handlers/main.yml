@@ -1,0 +1,19 @@
+---
+- name: restart sshd
+  ansible.builtin.service:
+    name: "{{ base_sshd_service }}"
+    state: restarted
+
+- name: reload fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: reloaded
+
+- name: restart docker
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+
+- name: apply docker-user firewall
+  ansible.builtin.command: /usr/local/sbin/nsb-docker-user-firewall.sh
+  changed_when: true

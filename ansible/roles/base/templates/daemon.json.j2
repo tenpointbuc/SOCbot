@@ -1,0 +1,10 @@
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "{{ base_log_max_size }}",
+    "max-file": "{{ base_log_max_file }}"
+  },
+  "live-restore": true,
+  "no-new-privileges": true,
+  "userland-proxy": false
+}

@@ -1,0 +1,17 @@
+# Managed by noc-soc-bundle (base role). Do not edit by hand.
+# SSH key-only posture (§9). Drop-in overrides the distro default.
+PasswordAuthentication {{ 'yes' if site.security.ssh.password_auth | default(false) else 'no' }}
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+# P2: PermitRootLogin defaults to prohibit-password (avoids lockout when root is
+# the only keyed account); set security.ssh.permit_root: no + allow_groups for the
+# hardened multi-tenant posture.
+PermitRootLogin {{ site.security.ssh.permit_root | default('prohibit-password') }}
+UsePAM yes
+X11Forwarding no
+MaxAuthTries 4
+{% if site.security.ssh.allow_groups | default([]) | length > 0 %}
+# Only these unix groups may SSH in (P2).
+AllowGroups {{ site.security.ssh.allow_groups | join(' ') }}
+{% endif %}

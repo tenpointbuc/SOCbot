@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noc-soc-bundle/config/site.schema.json",
+  "title": "noc-soc-bundle site.yaml",
+  "description": "Frozen per-site config surface (BUC-3 design §4). Validated by scripts/preflight.py. fail-closed: unknown top-level keys are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["site", "network", "notifier", "security"],
+  "properties": {
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "hostname", "timezone", "state_dir"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "tenant/site slug — namespaces state, backups, notifier routing",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "hostname": { "type": "string", "minLength": 1 },
+        "timezone": { "type": "string", "pattern": "^[A-Za-z]+/[A-Za-z0-9_+-]+$|^UTC$" },
+        "data_root": { "type": "string", "pattern": "^/", "default": "/opt" },
+        "state_dir": {
+          "type": "string",
+          "pattern": "^/(?!tmp(/|$))",
+          "description": "durable, backed up, NEVER /tmp (§3/§7)"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lan_cidr", "host_ip", "gateway", "local_domain"],
+      "properties": {
+        "lan_cidr": {
+          "type": "string",
+          "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+        },
+        "host_ip": { "type": "string", "format": "ipv4", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" },
+        "gateway": { "type": "string", "format": "ipv4", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" },
+        "local_domain": { "type": "string", "minLength": 1 },
+        "public_domain": { "type": "string", "description": "optional; omit if no external exposure" },
+        "lan6_cidr": {
+          "type": "string",
+          "description": "optional IPv6 LAN prefix allowed to reach published container ports; omit for IPv6 default-deny (P1-9)",
+          "pattern": "^[0-9A-Fa-f:]+/[0-9]{1,3}$"
+        }
+      }
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": { "enum": ["pihole", "hosts", "external"] },
+        "dhcp": {
+          "type": "boolean",
+          "default": false,
+          "description": "pihole serves DHCP for the LAN; only then does the container get NET_ADMIN (P2)"
+        }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": { "enum": ["npm", "caddy", "traefik", "none"] }
+      }
+    },
+    "firewall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": { "enum": ["fortigate", "none"] },
+        "fortigate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "api_scope_ip"],
+          "properties": {
+            "host": { "type": "string", "minLength": 1 },
+            "api_scope_ip": { "type": "string", "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "adapter": { "const": "fortigate" } } },
+          "then": { "required": ["fortigate"] }
+        }
+      ]
+    },
+    "notifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": { "enum": ["telegram", "slack", "webhook", "stdout"] },
+        "telegram": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["group_id", "poller"],
+          "properties": {
+            "group_id": { "type": "string", "minLength": 1 },
+            "topics": {
+              "type": "object",
+              "additionalProperties": { "type": "integer" }
+            },
+            "poller": {
+              "type": "boolean",
+              "description": "exactly-one getUpdates poller per bot (bot-global offset)"
+            }
+          }
+        },
+        "slack": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "name-only surface — the webhook/token VALUE lives in the secrets backend, referenced here by key NAME (mirrors url_secret). Closed to additionalProperties so a secret cannot hide in an open island (P1-7).",
+          "properties": {
+            "default_channel": { "type": "string" },
+            "webhook_url_secret": { "type": "string", "description": "secret key NAME for the Slack incoming-webhook URL; value lives in the backend, never here" },
+            "token_secret": { "type": "string", "description": "secret key NAME for a Slack bot/app token; value lives in the backend" }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "name-only surface — the webhook URL/headers live in the secrets backend by key NAME (P1-7).",
+          "properties": {
+            "url_secret": { "type": "string", "description": "secret key name; value lives in the backend, never here" },
+            "header_secret": { "type": "string", "description": "optional secret key NAME for an auth header value; value lives in the backend" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "adapter": { "const": "telegram" } } },
+          "then": { "required": ["telegram"] }
+        }
+      ]
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "properties": {
+        "adapter": { "enum": ["restic", "none"] },
+        "local_repo": { "type": "string" },
+        "offsite": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "name-only surface — offsite credentials (e.g. B2_ACCOUNT_ID/KEY) live in the secrets backend, never here. Closed to additionalProperties (P1-7).",
+          "properties": {
+            "provider": { "type": "string" },
+            "bucket": { "type": "string" },
+            "endpoint": { "type": "string" },
+            "region": { "type": "string" },
+            "key_id_secret": { "type": "string", "description": "secret key NAME for the offsite account/key id" },
+            "key_secret": { "type": "string", "description": "secret key NAME for the offsite account/key value" }
+          }
+        },
+        "schedule": { "$ref": "#/$defs/cron" },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "excludes": { "type": "array", "items": { "type": "string" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "adapter": { "const": "restic" } } },
+          "then": { "required": ["local_repo", "schedule", "paths"] }
+        }
+      ]
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "module": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "endpoints": { "type": "array", "items": { "type": "string" } },
+          "health": { "enum": ["http", "tcp", "container", "none"] },
+          "public": { "type": "boolean" },
+          "access": { "type": "string", "description": "gate for public rows, e.g. cloudflare" }
+        }
+      }
+    },
+    "modules": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" },
+      "description": "feature flags for optional add-ons"
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/cron" },
+      "description": "agent cron (local time via site.timezone)"
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ssh"],
+      "properties": {
+        "ssh": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "password_auth": { "type": "boolean", "default": false },
+            "key_only": { "type": "boolean", "default": true },
+            "permit_root": {
+              "enum": ["no", "prohibit-password", "yes"],
+              "default": "prohibit-password",
+              "description": "sshd PermitRootLogin. 'no' + allow_groups is the hardened multi-tenant posture; 'prohibit-password' (default) avoids lockout when root is the only keyed account (P2)"
+            },
+            "allow_groups": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "optional sshd AllowGroups allowlist; when set, only these unix groups may SSH in (P2)"
+            },
+            "authorized_keys": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "optional inline public keys (public keys are not secrets); preflight also accepts an --authorized-keys-file"
+            }
+          }
+        },
+        "fail2ban": { "type": "boolean", "default": true },
+        "fail2ban_ignore_lan": {
+          "type": "boolean",
+          "default": false,
+          "description": "when false (default), fail2ban ignoreip is loopback-only; when true, the whole lan_cidr is trusted (single-tenant LAN posture) (P2)"
+        },
+        "admin_bind": {
+          "type": "string",
+          "description": "host IP the admin/management UIs (NPM :81, pihole web, n8n, uptime-kuma) bind to. Defaults to 127.0.0.1 (loopback-only; reach via proxy+auth). Set to the host_ip to expose admin UIs on the LAN (P2).",
+          "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        },
+        "docker_log_caps": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_size": { "type": "string", "pattern": "^[0-9]+[kmg]$" },
+            "max_file": { "type": "string", "pattern": "^[0-9]+$" }
+          }
+        },
+        "images": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pin": { "type": "boolean", "default": true },
+            "overrides": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "service/image name -> pinned ref override"
+            }
+          }
+        }
+      }
+    },
+    "known_noise": {
+      "type": "object",
+      "description": "optional inline SOC known-noise rules; rendered to known-noise.yaml. Role 3 owns canonical content. Closed to the documented sections so a secret cannot hide in an open island (P1-7); the preflight key-name denylist + value scan also cover this subtree.",
+      "additionalProperties": false,
+      "properties": {
+        "operator_networks": { "type": "array" },
+        "firewall": { "type": "array" },
+        "falco": { "type": "array" }
+      }
+    }
+  },
+  "$defs": {
+    "cron": {
+      "type": "string",
+      "description": "5-field cron expression",
+      "pattern": "^\\s*([^\\s]+\\s+){4}[^\\s]+\\s*$"
+    }
+  }
+}

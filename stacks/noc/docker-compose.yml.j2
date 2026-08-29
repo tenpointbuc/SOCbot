@@ -1,0 +1,98 @@
+{#- RENDERED by scripts/render.py -> DO NOT EDIT the output. Edit this template. -#}
+# noc-soc-bundle :: stack=noc :: bring-up order 2/3 (§10, after core)
+# n8n, uptime-kuma, diun.
+# n8n hardening (§7 P0-3/P1-1): encryption key via *_FILE, env-access-in-node blocked,
+# execution-data pruning on. diun reaches docker ONLY via core's socket-proxy.
+name: nsb-noc
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "{{ site.security.docker_log_caps.max_size | default('10m') }}"
+    max-file: "{{ site.security.docker_log_caps.max_file | default('3') }}"
+
+networks:
+  nsb-noc:
+    name: nsb-noc
+  socket-proxy-net:
+    name: socket-proxy-net
+    external: true        # created by the core stack (bring-up order: core first)
+
+secrets:
+  n8n_encryption_key:
+    file: {{ secrets_dir }}/N8N_ENCRYPTION_KEY
+
+services:
+
+  n8n:
+    image: {{ images['n8n'] }}
+    container_name: nsb-n8n
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - nsb-noc
+    ports:
+      # loopback by default (P2) — closes the LAN-wide first-run owner-claim race
+      # (anyone on the LAN could otherwise claim the n8n owner account on first boot).
+      # Reach n8n via the proxy + auth, or set security.admin_bind to expose on LAN.
+      - "{{ admin_bind }}:5678:5678"
+    environment:
+      TZ: {{ tz }}
+      GENERIC_TIMEZONE: {{ tz }}
+      # highest-consequence secret; mounted as a file, never inlined (§7 P1-1)
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      # MANDATED: without this a Code node can read all container env (§7 P0-3)
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      # do not accumulate token-bearing execution data in the sqlite DB (§7)
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"          # hours (~14d)
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: "10000"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_HIRING_BANNER_ENABLED: "false"
+      N8N_HOST: "n8n.{{ site.network.local_domain }}"
+      N8N_PORT: "5678"
+      WEBHOOK_URL: "http://{{ host_ip }}:5678/"
+    secrets:
+      # n8nio/n8n runs as uid 1000 (node); the source secret file is root:root 0600
+      # (preflight-enforced), so mount it INTO the container owned by 1000 — else
+      # N8N_ENCRYPTION_KEY_FILE is unreadable and n8n crashes on first start.
+      - source: n8n_encryption_key
+        target: n8n_encryption_key
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
+    volumes:
+      - {{ data_root }}/n8n:/home/node/.n8n
+
+  uptime-kuma:
+    image: {{ images['uptime-kuma'] }}
+    container_name: nsb-uptime-kuma
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - nsb-noc
+    ports:
+      # status dashboard is an admin UI — loopback by default (P2)
+      - "{{ admin_bind }}:3001:3001"
+    volumes:
+      - {{ data_root }}/uptime-kuma:/app/data
+
+  diun:
+    image: {{ images['diun'] }}
+    container_name: nsb-diun
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - nsb-noc              # registry reachability (image update checks)
+      - socket-proxy-net     # docker API — proxied, read-only scope only (§7)
+    environment:
+      TZ: {{ tz }}
+      LOG_LEVEL: info
+      DIUN_WATCH_SCHEDULE: "0 */6 * * *"
+      DIUN_WATCH_JITTER: 30s
+      DIUN_PROVIDERS_DOCKER: "true"
+      DIUN_PROVIDERS_DOCKER_WATCHBYDEFAULT: "true"
+      # never the raw socket — CONTAINERS/IMAGES read scope via the proxy only
+      DOCKER_HOST: "tcp://nsb-socket-proxy:2375"
+    volumes:
+      - {{ data_root }}/diun:/data

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Managed by noc-soc-bundle (base role). Do not edit by hand.
+# Restricts NEW inbound traffic to published Docker container ports so it is
+# reachable only from the LAN — published ports bypass UFW, so the rule lives in
+# DOCKER-USER (§9 P1-4). Public services are exposed via the proxy/tunnel + an
+# access gate (§9), never by direct WAN->host-port, which this drops.
+#
+# P1-9 hardening:
+#   * dual-stack: the same policy is mirrored into ip6tables, so published ports
+#     are not reachable unfiltered over IPv6 on an IPv6-enabled Docker host.
+#   * multi-interface: applied to EVERY untrusted ingress interface (default
+#     WAN + any second WAN / VPN / wifi listed in base_untrusted_interfaces),
+#     not just the single default-route NIC.
+#   * IPv6 default-deny: with no IPv6 LAN prefix configured, NEW inbound IPv6 to
+#     containers on untrusted ifaces is dropped outright (established still ok).
+# Idempotent: re-applying flushes our previously-inserted (marked) rules first.
+set -euo pipefail
+
+MARK="nsb-docker-user"
+LAN4="{{ site.network.lan_cidr }}"
+LAN6="{{ base_lan6_cidr }}"
+IFACES=(
+{% for iface in base_untrusted_interfaces %}
+  "{{ iface }}"
+{% endfor %}
+)
+
+# apply_family <iptables-bin> <lan-cidr-or-empty>
+# Builds, per untrusted interface, the top-to-bottom order:
+#   established/related RETURN, LAN RETURN (if a LAN cidr is set), DROP.
+# When no LAN cidr is given (typical for IPv6), the family is default-deny:
+# established/related pass, everything else NEW to containers is dropped.
+apply_family() {
+  local BIN="$1" LAN="$2"
+
+  # DOCKER-USER only exists once docker has created it; wait briefly.
+  local ok=0 _
+  for _ in $(seq 1 30); do
+    "$BIN" -L DOCKER-USER -n >/dev/null 2>&1 && { ok=1; break; }
+    sleep 1
+  done
+  if [ "$ok" != 1 ]; then
+    # No DOCKER-USER chain for this family => docker is not forwarding/publishing
+    # over it, so there is nothing to filter. (Skip v6 cleanly on v4-only hosts.)
+    echo "$BIN: DOCKER-USER chain absent — skipping ($BIN not managing docker fwd?)" >&2
+    return 0
+  fi
+
+  # Flush our previously-inserted marked rules (idempotent re-apply).
+  while "$BIN" -L DOCKER-USER --line-numbers -n | grep -q "$MARK"; do
+    local line
+    line="$("$BIN" -L DOCKER-USER --line-numbers -n | awk -v m="$MARK" '$0 ~ m {print $1; exit}')"
+    "$BIN" -D DOCKER-USER "$line"
+  done
+
+  local iface
+  for iface in "${IFACES[@]}"; do
+    [ -n "$iface" ] || continue
+    # Insert order is reversed (-I prepends): final top-to-bottom becomes
+    # established -> LAN allow -> drop. DROP is unconditional for this iface, so
+    # traffic arriving on it that is neither established nor from the LAN is denied
+    # (default-deny per untrusted interface).
+    "$BIN" -I DOCKER-USER -i "$iface" -j DROP \
+      -m comment --comment "$MARK: drop non-LAN to containers ($iface)"
+    if [ -n "$LAN" ]; then
+      "$BIN" -I DOCKER-USER -i "$iface" -s "$LAN" -j RETURN \
+        -m comment --comment "$MARK: allow LAN to containers ($iface)"
+    fi
+    "$BIN" -I DOCKER-USER -i "$iface" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+      -m comment --comment "$MARK: allow established/related ($iface)"
+  done
+
+  echo "$BIN: applied (ifaces=${IFACES[*]} lan=${LAN:-<default-deny>})"
+}
+
+if command -v iptables >/dev/null 2>&1; then
+  apply_family iptables "$LAN4"
+else
+  echo "iptables not found — cannot apply IPv4 DOCKER-USER rules" >&2
+  exit 1
+fi
+
+# IPv6: mirror the policy. With no IPv6 LAN prefix, LAN6 is empty => default-deny.
+if command -v ip6tables >/dev/null 2>&1; then
+  apply_family ip6tables "$LAN6"
+else
+  echo "ip6tables not found — IPv6 published ports UNFILTERED if Docker has ip6tables enabled" >&2
+fi

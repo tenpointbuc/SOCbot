@@ -1,0 +1,16 @@
+# Managed by noc-soc-bundle (base role).
+[Unit]
+Description=noc-soc-bundle DOCKER-USER firewall rules
+After=docker.service
+Wants=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nsb-docker-user-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+# Also (re)applied whenever docker starts, so rules survive a daemon restart.
+WantedBy=docker.service

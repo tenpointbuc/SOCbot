@@ -1,0 +1,52 @@
+# noc-soc-bundle — SOC known-noise registry (Role 3, BUC-8). §2/§4: was prose in
+# the soc-analyst persona / HOMELAB.md, now machine-readable so the skills read
+# it instead of hardcoding host facts. config.py `known-noise` reads this.
+#
+# Each entry: a documented benign pattern the SOC skills must NOT re-raise as a
+# finding. `source` = which detector; `match` = how to recognize it; `why` =
+# the mechanism; `action` = the correct disposition. Values are illustrative
+# placeholders — a new site prunes/extends this list.
+
+operator_networks:            # SSH/console from these = the operator, not an intruder (still note first-seen IPs)
+  - { cidr: "198.51.100.0/24", user: operator, why: "operator VLAN (workstations + laptops)" }
+  - { ip: "192.0.2.10", user: operator, why: "operator workstation on LAN" }
+
+firewall:
+  - source: fortigate
+    match: { logid: "0104043571", type: "event/system", subtype: rogue-ap-changed }
+    why: "wireless rogue-ap-changed flood; memory log is a ~minutes ring buffer and the API ignores the subtype path — 0 rows != nothing happened"
+    action: "filter by logid; login OK=0100032001 / failed=0100032002; exclude Fortimanager_Access/fgfm"
+
+falco:
+  - source: falco
+    match: { fd_name_prefix: "/root/.ollama/" }
+    why: "ollama model/cache writes"
+    action: whitelist
+  - source: falco
+    match: { fd_name_prefix: "/root/.cache/" }
+    why: "open-webui / ollama caches"
+    action: whitelist
+  - source: falco
+    note: "container.name is always <NA> (cgroup-only plugin) — identify by proc.name + fd.name path, never by container name; add exceptions in falco_rules.local.yaml by proc/path, NEVER by container name"
+
+containers:
+  - source: docker
+    match: { name: ollama, state: exited }
+    why: "intentionally stopped 2026-06-06; watchdog-whitelisted"
+    action: "expected — do not raise"
+  - source: docker
+    match: { image_glob: "*:latest", finding: high-cve-count }
+    why: "high CVE counts on :latest are inherent to upstream; a re-pull is a no-op"
+    action: "verify by digest; do not recommend redeploys for CVEs unless the upstream digest actually changed"
+
+host:
+  - source: homeassistant
+    match: { log_substr: "habluetooth.scanner hci0" }
+    why: "HA/BlueZ scanner log spam (~4,300/12h)"
+    action: "cosmetic — not service-affecting; do not raise"
+
+operator_activity_windows:    # timing that lines up with these is expected, not novel
+  - { what: backup, when: "02:00 host-time (UTC) daily", source: "restic + B2 cron" }
+  - { what: weekly-scans, when: "Sun ~01:45-03:00 local", source: "trivy/clamav/weekly-audit" }
+  - { what: image-checks, when: "every 6h", source: diun }
+  - { what: agent-sessions, when: "ad hoc", source: "Claude Code sessions from operator networks" }

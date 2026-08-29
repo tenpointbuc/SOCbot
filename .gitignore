@@ -1,0 +1,18 @@
+# Secrets never touch git (§7).
+secrets/
+*.env
+!config/*.example.yaml
+*-password
+*.key
+# runtime state, never committed (§3/§7)
+/var/lib/noc-soc/
+# render output + local ansible inventory
+/rendered/
+ansible/inventory.ini
+# real per-site values — only *.example.yaml and the schema are committed
+config/site.yaml
+config/known-noise.yaml
+config/service-registry.yaml
+# python
+__pycache__/
+*.pyc

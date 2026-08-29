@@ -1,0 +1,35 @@
+---
+# base role defaults (overridable per host/site).
+base_manage_ssh: true
+base_manage_fail2ban: "{{ site.security.fail2ban | default(true) }}"
+base_manage_docker: true
+base_docker_user_firewall: true
+
+base_sshd_service: ssh                # 'ssh' on Debian/Ubuntu, 'sshd' on RHEL
+
+# The login account keys are installed for and checked against. Defaults to the
+# inventory's ansible_user; DO NOT fall back to ansible_env.USER — under the
+# play's become:true that resolves to root, so keys land on root while the real
+# login account has none => host lockout (§9). Deploy asserts this is set & non-root.
+base_ssh_user: "{{ ansible_user | default('') }}"
+base_wan_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+# DOCKER-USER firewall (P1-9): untrusted ingress interfaces on which NEW inbound
+# to published container ports is dropped unless it comes from the LAN. Defaults
+# to the default-route NIC; add second WANs / VPN / wifi NICs here so published
+# ports are not silently reachable over an unfiltered interface.
+base_untrusted_interfaces: "{{ [base_wan_interface] }}"
+# Optional IPv6 LAN prefix allowed to reach containers. When empty (default) the
+# firewall DENIES all NEW inbound IPv6 to published ports on untrusted ifaces —
+# on an IPv6-enabled Docker host, published ports would otherwise be reachable
+# over IPv6 completely unfiltered (P1-9). Set only if you serve the LAN over v6.
+base_lan6_cidr: "{{ site.network.lan6_cidr | default('') }}"
+
+base_docker_packages:
+  - docker.io
+  - docker-compose-plugin
+
+base_log_max_size: "{{ site.security.docker_log_caps.max_size | default('10m') }}"
+base_log_max_file: "{{ site.security.docker_log_caps.max_file | default('3') }}"
+
+base_lan_cidr: "{{ site.network.lan_cidr }}"
+base_data_root: "{{ site.site.data_root | default('/opt') }}"

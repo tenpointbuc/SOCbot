@@ -1,0 +1,191 @@
+# noc-soc-bundle — service registry (Role 3, BUC-8). §2/§4: was prose in
+# HOMELAB.md, now the machine-readable port map + probe detail the skills consume.
+#
+# This is the SKILL-FACING registry (richer than site.yaml's schema-constrained
+# inline `services:`). config.py reads this file first. Fields:
+#   name          logical service name
+#   container     docker container name (may differ from name)
+#   module        <tier>/<service>  (core|noc|soc|optional)
+#   port          primary host port (0 = no published port)
+#   admin_port    optional admin UI port + bind note
+#   endpoints     [ <svc>.<local_domain>, <svc>.<public_domain> ]  (host-agnostic; suffixes come from network.*)
+#   health        http | https | tcp | dns | container | none
+#   probe         path + optional expected substring for http/https/dns health
+#   network       docker network(s) the container attaches to
+#   public        exposed beyond LAN?  access: gate for public rows
+#   expect_state  normal `docker` state if not "running" (e.g. ollama: exited)
+#   deps          service dependencies (for incident triage)
+#   notes         operator-relevant caveats
+#
+# Values are illustrative placeholders, proving coverage. No reference-host
+# literals leak into the skills — the skills read this registry + network.* for
+# the .home/.dev suffixes.
+
+services:
+  # ---- core -------------------------------------------------------------
+  - name: nginx-proxy-manager
+    container: nginx-proxy-manager
+    module: core/npm
+    port: 80
+    admin_port: "81 (bind 127.0.0.1 only)"
+    health: http
+    probe: { port: 81, path: "/", bind: "127.0.0.1" }
+    network: nginx-proxy-manager_default
+    public: false
+    notes: "reverse proxy + TLS for all services; routes by hostname"
+  - name: pihole
+    container: pihole
+    module: core/pihole
+    port: 8080
+    health: dns
+    probe: { dns_query: "google.com", expect_nonempty: true }
+    endpoints: [pihole]
+    network: pihole_default
+    public: false
+    notes: "LAN DNS + <svc>.<local_domain> records; v6 API on :8080"
+  - name: socket-proxy
+    container: socket-proxy
+    module: core/socket-proxy
+    port: 0
+    health: container
+    network: socket-proxy-net
+    public: false
+    notes: "restricted Docker API for non-Portainer consumers; membership = secrets grant (§7 P0-2)"
+  - name: cloudflared
+    container: cloudflared
+    module: core/cloudflared
+    port: 0
+    health: container
+    public: false
+    notes: "outbound tunnel; fronts public endpoints. loopback-rebinding a tunnel-fronted service breaks it"
+
+  # ---- noc --------------------------------------------------------------
+  - name: n8n
+    container: n8n
+    module: noc/n8n
+    port: 5678
+    health: http
+    probe: { path: "/healthz" }
+    network: [n8n_default, socket-proxy-net]
+    public: false
+    notes: "automation backbone; SQLite db in data_root; watchdog + digest workflows"
+  - name: uptime-kuma
+    container: uptime-kuma
+    module: noc/uptime-kuma
+    port: 3001
+    health: http
+    probe: { path: "/" }
+    network: uptime-numa_default
+    public: false
+    notes: "kuma.db world-readable — copy before querying, never write live db; 1.x->2.x migration staged"
+  - name: diun
+    container: diun
+    module: noc/diun
+    port: 0
+    health: container
+    network: socket-proxy-net
+    public: false
+    notes: "image-update notifier (6h); does not auto-update"
+  - name: dozzle
+    container: dozzle
+    module: noc/dozzle
+    port: 9999
+    health: http
+    probe: { path: "/" }
+    endpoints: [logs]
+    network: socket-proxy-net
+    public: false
+
+  # ---- soc --------------------------------------------------------------
+  - name: falco
+    container: falco
+    module: soc/falco
+    port: 0
+    health: container
+    public: false
+    notes: "runtime alerts; container.name is <NA> (cgroup plugin) — identify by proc.name+fd.name; custom rules in falco_rules.local.yaml"
+  - name: clamav
+    container: clamav
+    module: soc/clamav
+    port: 0
+    health: container
+    public: false
+
+  # ---- optional ---------------------------------------------------------
+  - name: portainer
+    container: portainer
+    module: optional/portainer
+    port: 9443
+    health: https
+    probe: { path: "/", insecure: true }
+    public: false
+    notes: "direct docker.sock (management exception to socket-proxy rule)"
+  - name: immich
+    container: immich_server
+    module: optional/immich
+    port: 2283
+    health: http
+    probe: { path: "/api/server/ping", expect: "pong" }
+    endpoints: [immich, immich]     # local + public; suffixes from network.local_domain/public_domain
+    network: immich_default
+    public: true
+    access: cloudflare
+    deps: [immich_postgres, immich_redis, immich_machine_learning]
+    notes: "postgres creds default (known, low priority); ML worker can hang on model load"
+  - name: immich_machine_learning
+    container: immich_machine_learning
+    module: optional/immich
+    port: 0
+    health: container
+    network: immich_default
+    public: false
+  - name: immich_postgres
+    container: immich_postgres
+    module: optional/immich
+    port: 0
+    health: container
+    network: immich_default
+    public: false
+  - name: immich_redis
+    container: immich_redis
+    module: optional/immich
+    port: 0
+    health: container
+    network: immich_default
+    public: false
+  - name: vaultwarden
+    container: vaultwarden
+    module: optional/vaultwarden
+    port: 8222
+    health: http
+    probe: { path: "/alive" }
+    endpoints: [vault, vault]
+    network: vaultwarden_default
+    public: true
+    access: cloudflare
+  - name: homeassistant
+    container: homeassistant
+    module: optional/homeassistant
+    port: 8123
+    health: http
+    probe: { path: "/" }
+    network: host
+    public: false
+    notes: "host network mode; BlueZ scanner log spam is cosmetic known noise"
+  - name: ollama
+    container: ollama
+    module: optional/ollama
+    port: 11434
+    health: none
+    network: ollama_default
+    public: false
+    expect_state: exited
+    notes: "intentionally stopped; watchdog-whitelisted — leave it down"
+  - name: open-webui
+    container: open-webui
+    module: optional/ollama
+    port: 3000
+    health: http
+    probe: { path: "/" }
+    public: false
+    deps: [ollama]
