@@ -15,7 +15,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install bundle Python deps (PyYAML, Jinja2, jsonschema)
+      # pyyaml     — config.py's one runtime dependency (system-wide on the reference host)
+      # jinja2     — render.py's compose renderer; without it the P1-5 render-stamp
+      #              check in tests/hardening_checks.py degrades to SKIP
+      # jsonschema — preflight.py's schema gate. Without it preflight reports
+      #              "jsonschema not installed" and the P1-7 closed-island schema is
+      #              never actually enforced anywhere. CI is where that gets proven.
+      # Versions pinned in requirements.txt — the single source of truth (BUC-9).
+      - name: Install bundle Python deps
         run: pip install -r requirements.txt
       - name: QA suite (Role 3 — tooling & adapters)
         run: bash tests/run-qa.sh
