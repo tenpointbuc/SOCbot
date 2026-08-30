@@ -26,22 +26,37 @@ scripts/validate.py --site config/site.yaml \
 `--require-live` makes a skipped host probe a **failure**. Without it the checklist is green
 on a host it never touched. Exit non-zero on any `fail`.
 
+**Which service registry gets probed.** A5 and A6 walk the service registry, so a run against
+the *wrong* registry is green having probed nothing real. `validate.py` resolves it in this
+order and reports the winner as **A3** — check that row before trusting A5/A6:
+
+1. `--service-registry <path>`, else `$NOCSOC_SERVICE_REGISTRY`
+2. `service-registry.yaml` next to your `--site` file
+3. `<rendered-dir>/service-registry.yaml` — the real one, written by `render.py`
+   ([RUNBOOK §6b](RUNBOOK.md#6-dry-run--three-gates-in-order)); pass `--rendered-dir` if you
+   rendered somewhere other than `./rendered`
+4. `service-registry.example.yaml` — the shipped **placeholder** (services at `example.test`)
+
+Landing on 4 under `--require-live` is a `fail`, by design: probing placeholders is not
+evidence. The command above needs no extra flag on a bundle rendered in place.
+
 `validate.py` emits one row per check, each `ok` / `warn` / `skip` / `fail`. Map them here:
 
 | # | Group :: check | What it proves | Expected on a good deploy | If it fails |
 |---|---|---|---|---|
 | A1 | `config :: config resolves + validates` | `site.yaml` loads and satisfies `site.schema.json` | `ok` | Fix config; re-run preflight ([RUNBOOK §6](RUNBOOK.md#6-dry-run--three-gates-in-order)) |
 | A2 | `config :: renders deploy artifacts` | Templates render; compose guards pass | `ok` | `ModuleNotFoundError: jinja2` → deps missing. Otherwise a template/config error |
-| A3 | `preflight :: fail-closed gate (schema+secrets+poller+ssh)` | The whole gate passes against the **live** secrets backend | `ok` — a `skip` here under `--require-live` is a FAIL | Read the named check; see [RUNBOOK §12](RUNBOOK.md#12-troubleshooting--indexed-by-the-exact-message) |
-| A4 | `containers :: all containers in expected state` | Every registry service is in its expected docker state, honoring `expect_state` | `ok` | `docker ps -a`, then `docker logs --tail 50 <name>`; run the `noc-incident` skill |
-| A5 | `endpoints :: endpoints resolve + serve` | Each `health: http` service answers its probe | `ok` | Work the layers: container → published port → proxy vhost → DNS → tunnel |
-| A6 | `adapters :: dns (<adapter>)` | The configured DNS adapter functions | `ok`, or `skip` iff `dns.adapter: external` | `dig @<host_ip> google.com +short` and a local record |
-| A7 | `adapters :: proxy (<adapter>)` | The configured proxy adapter functions | `ok`, or `skip` iff `proxy.adapter: none` | Check the proxy admin UI (loopback-bound by default) |
-| A8 | `adapters :: tunnel (<adapter>)` | Public ingress works | `ok`, or `skip` if no `public: true` service | `docker logs <tunnel> --since 30m` for reconnect churn |
-| A9 | `backup :: backup dry-run (<adapter>)` | restic can reach and read the repo | `ok`, or `skip` iff `backup.adapter: none` **and** you deployed with `--allow-no-backup` | Check `RESTIC_PASSWORD`, repo path, B2 credentials |
-| A10 | `notifier :: test message dispatch` | A message dispatches **and** is recorded to the durable state dir | `ok` | A `warn` = dispatched but not recorded → the notifier degraded to stdout. Treat as a finding, see B7 |
-| A11 | `soc :: state dir contract` | `<state_dir>/<site-id>/` exists, is writable, is not `/tmp` | `ok` | Create it, chown to the service user |
-| A12 | `soc :: weekly-audit baseline` | `soc/audit-latest.json` exists | `ok` after the audit has run once | `warn` is expected on a **first** pass. ⚠️ It currently stays `warn` — no shipped job produces the audit, see [RUNBOOK §8.2](RUNBOOK.md#82-seed-the-soc-baseline) and B11. Carry it as a known finding; do not hand-write the baseline |
+| A3 | `config :: service registry source` | Which registry A5/A6 will probe, and that it is not the shipped placeholder | `ok`, naming `rendered/service-registry.yaml` (or your own registry) | `PLACEHOLDER registry` → you are probing `example.test` rows, not your deploy: render first ([RUNBOOK §6b](RUNBOOK.md#6-dry-run--three-gates-in-order)), or pass `--service-registry` / `--rendered-dir`. `no service-registry.yaml found` = falling back to inline `services:` in `site.yaml` |
+| A4 | `preflight :: fail-closed gate (schema+secrets+poller+ssh)` | The whole gate passes against the **live** secrets backend | `ok` — a `skip` here under `--require-live` is a FAIL | Read the named check; see [RUNBOOK §12](RUNBOOK.md#12-troubleshooting--indexed-by-the-exact-message) |
+| A5 | `containers :: all containers in expected state` | Every registry service is in its expected docker state, honoring `expect_state` | `ok` | `docker ps -a`, then `docker logs --tail 50 <name>`; run the `noc-incident` skill |
+| A6 | `endpoints :: endpoints resolve + serve` | Each `health: http` service answers its probe | `ok` | Work the layers: container → published port → proxy vhost → DNS → tunnel |
+| A7 | `adapters :: dns (<adapter>)` | The configured DNS adapter functions | `ok`, or `skip` iff `dns.adapter: external` | `dig @<host_ip> google.com +short` and a local record |
+| A8 | `adapters :: proxy (<adapter>)` | The configured proxy adapter functions | `ok`, or `skip` iff `proxy.adapter: none` | Check the proxy admin UI (loopback-bound by default) |
+| A9 | `adapters :: tunnel (<adapter>)` | Public ingress works | `ok`, or `skip` if no `public: true` service | `docker logs <tunnel> --since 30m` for reconnect churn |
+| A10 | `backup :: backup dry-run (<adapter>)` | restic can reach and read the repo | `ok`, or `skip` iff `backup.adapter: none` **and** you deployed with `--allow-no-backup` | Check `RESTIC_PASSWORD`, repo path, B2 credentials |
+| A11 | `notifier :: test message dispatch` | A message dispatches **and** is recorded to the durable state dir | `ok` | A `warn` = dispatched but not recorded → the notifier degraded to stdout. Treat as a finding, see B7 |
+| A12 | `soc :: state dir contract` | `<state_dir>/<site-id>/` exists, is writable, is not `/tmp` | `ok` | Create it, chown to the service user |
+| A13 | `soc :: weekly-audit baseline` | `soc/audit-latest.json` exists | `ok` after the audit has run once | `warn` is expected on a **first** pass. ⚠️ It currently stays `warn` — no shipped job produces the audit, see [RUNBOOK §8.2](RUNBOOK.md#82-seed-the-soc-baseline) and B11. Carry it as a known finding; do not hand-write the baseline |
 
 > **Adapter-fallback note.** A fully-`none` site (`firewall=none, dns=hosts, proxy=none,
 > notifier=stdout, backup=none`) is a supported, CI-tested configuration and still keeps the
@@ -82,7 +97,7 @@ rails. Run each by hand and record the evidence.
 | B8 | **Triage flow** | Run the `soc-triage` skill — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Reads the known-noise registry, walks SOC event log / auth / Falco / containers / firewall, and emits a severity-ordered verdict. Creates `soc/triage-last.json` as the cursor |
 | B9 | **Triage cursor** | Run the `soc-triage` skill a second time — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Only new events since the cursor are reported — the cursor advanced |
 | B10 | **Investigation flow** | Run the `soc-investigate` skill against a real line from `soc/event-log.md` — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Builds a timeline across sources, correlates against known-noise, ends in ✅ / 🟡 / 🔴 with concrete next evidence. Read-only — nothing was changed |
-| B11 | **Weekly audit** | ⚠️ **Not runnable from this bundle.** `schedule.soc_weekly` has no consumer — no unit, no workflow, no script produces the audit ([RUNBOOK §8.4.4](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each)) | `soc/audit-latest.json` written; `logs/soc-weekly-audit.log` populated; this also clears A12. **Until the job ships, record FAIL (gap: no shipped weekly-audit job).** Do not hand-write the file |
+| B11 | **Weekly audit** | ⚠️ **Not runnable from this bundle.** `schedule.soc_weekly` has no consumer — no unit, no workflow, no script produces the audit ([RUNBOOK §8.4.4](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each)) | `soc/audit-latest.json` written; `logs/soc-weekly-audit.log` populated; this also clears A13. **Until the job ships, record FAIL (gap: no shipped weekly-audit job).** Do not hand-write the file |
 | B12 | **Weekly interpretation** | Run the `soc-weekly` skill — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each). **Blocked on B11** — it interprets an audit result, it does not produce one | Explains the score, separates structural from actionable deductions, gives top-3 operator-executable actions |
 | B13 | **Known-noise suppression** | `python3 tooling/lib/config.py known-noise` | Returns your site's registry, and B8's output actually suppressed the entries in it |
 | B14 | **Redaction** | Review all Part B output | No secret value, no token-bearing URL appears in any output or log |
@@ -143,7 +158,7 @@ Date:               ______________________
 Adapters:  dns=______  proxy=______  firewall=______  notifier=______  backup=______
 Modules:   llm=____  media=____  home_automation=____
 
-Part A  (A1–A12)   PASS / FAIL     evidence: validation-<date>.json attached
+Part A  (A1–A13)   PASS / FAIL     evidence: validation-<date>.json attached
 Part B  NOC        (B1–B7)         PASS / FAIL
 Part B  SOC        (B8–B14)        PASS / FAIL
 Part B  Security   (B15–B28)       PASS / FAIL

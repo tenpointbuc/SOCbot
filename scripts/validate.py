@@ -5,7 +5,7 @@ Run AFTER a Role-2/Role-3 bring-up to prove the site is actually healthy — the
 operator-facing "is it really up?" gate and the seed for the BUC-6 runbook.
 
 Checklist (§10), each item a first-class check with an ok/warn/skip/fail status:
-  config      site.yaml resolves, validates, and renders to deploy artifacts
+  config      site.yaml resolves, validates, renders, and names a real registry
   preflight   the fail-closed gate (schema + secrets + poller + ssh) passes
   containers  every registry service is in its expected docker state
   endpoints   each service endpoint resolves + serves its health probe
@@ -145,6 +145,50 @@ def _docker_ok():
     return rc == 0
 
 
+def _is_example_path(path):
+    """True for the shipped placeholder files (*.example.yaml / *.example.yml)."""
+    base = os.path.basename(path or "")
+    return ".example." in base
+
+
+def _short(path):
+    """Path relative to the bundle when it lives inside it — matches doc paths."""
+    try:
+        rel = os.path.relpath(path, BUNDLE_ROOT)
+    except Exception:
+        return path
+    return path if rel.startswith(os.pardir) else rel
+
+
+def resolve_service_registry(args, cfg_dir):
+    """Decide which service registry every downstream check reads, and say why.
+
+    RUNBOOK §3 puts site.yaml in config/, and config/ ships only
+    service-registry.example.yaml — placeholder rows pointing at example.test.
+    The registry that describes *this deployment* is the one render.py writes
+    to rendered/service-registry.yaml (§6b). Probing the example instead makes
+    the container/endpoint checks report green having touched nothing real, so
+    the rendered registry is preferred over it and the example is a last resort.
+
+    Sets $NOCSOC_SERVICE_REGISTRY (config.py reads it) and returns
+    (path, origin); origin is flag | env | config | rendered | example | none.
+    """
+    if args.service_registry:
+        path = os.path.abspath(args.service_registry)
+        os.environ["NOCSOC_SERVICE_REGISTRY"] = path
+        return path, "flag"
+    if os.environ.get("NOCSOC_SERVICE_REGISTRY"):
+        return os.path.abspath(os.environ["NOCSOC_SERVICE_REGISTRY"]), "env"
+    for cand, origin in ((os.path.join(cfg_dir, "service-registry.yaml"), "config"),
+                         (os.path.join(args.rendered_dir, "service-registry.yaml"), "rendered"),
+                         (os.path.join(cfg_dir, "service-registry.example.yaml"), "example")):
+        if os.path.exists(cand):
+            path = os.path.abspath(cand)
+            os.environ["NOCSOC_SERVICE_REGISTRY"] = path
+            return path, origin
+    return None, "none"
+
+
 # --- checks ----------------------------------------------------------------
 
 def check_config(cl, cfg, args):
@@ -170,6 +214,35 @@ def check_config(cl, cfg, args):
                     (err.strip().splitlines()[-1] if err.strip() else "render.py failed"))
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def check_service_registry(cl, cfg, args, registry):
+    """Name the registry the container/endpoint checks will probe.
+
+    Without this row a run against the shipped example registry looks identical
+    to a run against the real one — same green rows, placeholder services. Under
+    --require-live, where a skipped probe is already a failure, probing
+    placeholders is a failure too.
+    """
+    g, n = "config", "service registry source"
+    path, origin = registry
+    try:
+        count = len(cfg.load_service_registry())
+    except Exception as e:
+        cl.fail(g, n, "registry unreadable: %s" % e)
+        return
+    if path is None:
+        cl.warn(g, n, "no service-registry.yaml found; using inline services: "
+                      "from site.yaml (%d services)" % count)
+        return
+    if _is_example_path(path):
+        detail = ("%s is the shipped PLACEHOLDER registry (%d services) — the real one is "
+                  "%s, written by render.py (RUNBOOK §6b); pass --service-registry to override"
+                  % (_short(path), count,
+                     _short(os.path.join(args.rendered_dir, "service-registry.yaml"))))
+        (cl.fail if args.require_live else cl.warn)(g, n, detail)
+        return
+    cl.ok(g, n, "%s (%s, %d services)" % (_short(path), origin, count))
 
 
 def check_preflight(cl, cfg, args, live):
@@ -461,7 +534,11 @@ def main(argv=None):
                                  description="noc-soc-bundle post-deploy validation (BUC-9 §10)")
     ap.add_argument("--site", default=os.path.join(BUNDLE_ROOT, "config", "site.example.yaml"))
     ap.add_argument("--service-registry", default=None,
-                    help="rich service registry (else <cfgdir>/service-registry[.example].yaml)")
+                    help="rich service registry (else <cfgdir>/service-registry.yaml, "
+                         "else <rendered-dir>/service-registry.yaml, else the example)")
+    ap.add_argument("--rendered-dir", default=os.path.join(BUNDLE_ROOT, "rendered"),
+                    help="render.py output dir, holding the real service registry "
+                         "(default: ./rendered — same as bootstrap.sh --rendered-dir)")
     ap.add_argument("--secrets-dir", default="/etc/noc-soc/secrets")
     ap.add_argument("--authorized-keys-file", default=None)
     ap.add_argument("--offline", action="store_true",
@@ -484,20 +561,14 @@ def main(argv=None):
     # every check reads the same resolved site (never a hardcoded host fact).
     os.environ["NOCSOC_CONFIG"] = os.path.abspath(args.site)
     cfg_dir = os.path.dirname(os.path.abspath(args.site))
-    if args.service_registry:
-        os.environ["NOCSOC_SERVICE_REGISTRY"] = os.path.abspath(args.service_registry)
-    elif "NOCSOC_SERVICE_REGISTRY" not in os.environ:
-        for cand in ("service-registry.yaml", "service-registry.example.yaml"):
-            p = os.path.join(cfg_dir, cand)
-            if os.path.exists(p):
-                os.environ["NOCSOC_SERVICE_REGISTRY"] = p
-                break
+    registry = resolve_service_registry(args, cfg_dir)
     import config as cfg  # tooling/lib/config.py
 
     live = args.live or (not args.offline and _docker_ok())
 
     cl = Checklist()
     check_config(cl, cfg, args)
+    check_service_registry(cl, cfg, args, registry)
     check_preflight(cl, cfg, args, live)
     check_containers(cl, cfg, args, live)
     check_endpoints(cl, cfg, args, live)

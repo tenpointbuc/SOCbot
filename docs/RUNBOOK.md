@@ -442,7 +442,7 @@ ls "$(python3 tooling/lib/config.py get site.state_dir)/$(python3 tooling/lib/co
 > `site.yaml` is a cron expression with **no consumer**: no systemd unit, no n8n workflow and
 > no script in this repo reads it, so nothing produces `soc/audit-latest.json`. On a clean
 > deployment the `ls` above is empty and stays empty. Carry it as a known finding —
-> **A12 `warn`**, **[B11](VALIDATION.md) FAIL (gap: no shipped weekly-audit job)**, **B12
+> **A13 `warn`**, **[B11](VALIDATION.md) FAIL (gap: no shipped weekly-audit job)**, **B12
 > blocked on B11** — and do not hand-write the file to make the row go green; a fabricated
 > baseline makes every later `soc-weekly` interpretation wrong. Everything else in Part A and
 > Part B is unaffected by this gap.
@@ -550,7 +550,7 @@ Two things to know before you record a result:
   bundle — no unit, no n8n workflow, no script reads it. So `soc/audit-latest.json` and
   `logs/soc-weekly-audit.log` do not appear on their own. Until that job ships, record **B11
   as FAIL (gap: no shipped weekly-audit job)** and **B12 as BLOCKED on B11**, and note that
-  A12 stays `warn` for the same reason — [§8.2](#82-seed-the-soc-baseline) cannot actually
+  A13 stays `warn` for the same reason — [§8.2](#82-seed-the-soc-baseline) cannot actually
   seed it. Do not paper over this by hand-writing the file.
 - **`noc-incident` restarts things.** It is the only skill with change authority, and B3 asks
   you to induce the failure it repairs. Do that on a container you have chosen to be
@@ -581,6 +581,16 @@ scripts/validate.py --site config/site.yaml --secrets-dir /etc/noc-soc/secrets -
 
 `--require-live` turns a skipped host probe into a failure — that is the real post-deploy
 gate. Without it, a checklist that never actually probed your host reports green.
+
+The container and endpoint rows walk the **service registry**, and `config/` ships only
+`service-registry.example.yaml` (placeholder services at `example.test`). The registry that
+describes *your* deployment is the one [§6b](#6-dry-run--three-gates-in-order) rendered to
+`rendered/service-registry.yaml`. `validate.py` prefers that one and refuses the example
+under `--require-live`, so the command above needs no extra flag — add `--rendered-dir
+<path>` if you gave `bootstrap.sh` a non-default `--rendered-dir`, or `--service-registry
+<path>` to name a registry directly. Either way, confirm the `config :: service registry
+source` row names the file you expect before trusting the container/endpoint rows
+([VALIDATION.md A3](VALIDATION.md#part-a--the-automated-gate)).
 
 Also run the value-based secret scan against the **generated** artifacts, which CI cannot do
 because it has no access to your backend:
@@ -658,6 +668,7 @@ if you meet them cold.
 | render-stamp assertion fails during the play | Deploying stale/hand-edited `rendered/` | Re-run `./bootstrap.sh` (never `ansible-playbook` directly) |
 | `restart` returns 403 via socket-proxy | Wrong socket-proxy image | Use the pinned `lscr.io/linuxserver/socket-proxy`. **Do not set `POST=1`.** |
 | `validate.py` all-skip / green with nothing probed | Ran without `--require-live`, or off-host | Re-run on the target with `--require-live` |
+| `is the shipped PLACEHOLDER registry` | The registry resolved to `config/service-registry.example.yaml`, so the container/endpoint rows would probe `example.test` | Render first ([§6b](#6-dry-run--three-gates-in-order)) so `rendered/service-registry.yaml` exists, or pass `--rendered-dir` / `--service-registry` ([§9](#9-validate)) |
 | `state dir … not writable` | `state_dir` missing or wrong owner | Create it, chown to the service user. Never `/tmp`. |
 | Admin UI unreachable from your laptop | Loopback bind by default | SSH-tunnel, or set `security.admin_bind` deliberately |
 | Published port unreachable from the LAN | DOCKER-USER firewall, or `host_ip` wrong | Check `network.lan_cidr` and `base_untrusted_interfaces`; add secondary WAN/VPN/wifi NICs |

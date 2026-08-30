@@ -122,3 +122,7 @@ qa:
 - **D** — the secret scan flags a planted token in a tracked file (regex) and a
   backend secret value inlined into a generated artifact (value diff), and is
   clean on the untouched bundle + artifacts, without echoing any secret value.
+- **E** — service registry resolution: the rendered registry wins over the shipped
+  `service-registry.example.yaml`, a real registry beside `site.yaml` wins over
+  both, and under `--require-live` landing on the example is a `fail` — so the
+  container/endpoint rows can never report green having probed placeholders.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# noc-soc-bundle — QA / validation-layer self-test (BUC-9). Proves the four
-# success criteria of the QA layer, offline (no host, no docker needed):
+# noc-soc-bundle — QA / validation-layer self-test (BUC-9). Proves the success
+# criteria of the QA layer, offline (no host, no docker needed):
 #
 #   A. validate.py is green on a fresh Role-2/Role-3 bring-up (--offline)
 #   B. every adapter none-fallback row passes (firewall=none, dns=hosts,
@@ -11,6 +11,9 @@
 #      the value pass flags a backend secret value inlined into a generated
 #      artifact (rendered compose + exported workflow JSON), and both are CLEAN
 #      on the untouched artifacts.
+#   E. service registry resolution (BUC-23): the rendered registry beats the
+#      shipped example, a real one beside site.yaml beats both, and under
+#      --require-live the example is a FAIL — no green run against placeholders.
 #
 # Exit non-zero on any failure. Run alongside tests/run-qa.sh (Role 3 self-test)
 # in CI — see the CI snippet in docs/QA.md.
@@ -267,6 +270,80 @@ if [ "$HAVE_JINJA" = 1 ]; then
 else
   skip "value pass on generated artifacts (needs Jinja2 to render compose)"
 fi
+
+# -------------------------------------------------------------------------
+sec "E. service registry resolution (BUC-23: no false green on the example)"
+# RUNBOOK §3 puts site.yaml in config/, which ships only the *example* registry
+# (placeholder rows at example.test). If validate.py silently picks that up, the
+# container/endpoint checks probe nothing real and still report green. Every row
+# here reads one JSON status, so the whole section is dep-free (PyYAML only).
+REGDIR="$QA/regcfg"; mkdir -p "$REGDIR" "$QA/rendered-real" "$QA/rendered-empty"
+cp "$ROOT/config/site.example.yaml"        "$REGDIR/site.yaml"
+cp "$ROOT/config/known-noise.example.yaml" "$REGDIR/known-noise.yaml"
+# REGDIR mirrors the shipped config/ dir: an example registry and no real one,
+# which is exactly the layout RUNBOOK §3 leaves behind.
+cp "$ROOT/config/service-registry.example.yaml" "$REGDIR/service-registry.example.yaml"
+cp "$ROOT/config/service-registry.example.yaml" "$QA/rendered-real/service-registry.yaml"
+
+# status|detail of the "service registry source" row, with the harness-wide
+# NOCSOC_SERVICE_REGISTRY unset so resolution order is what is under test.
+reg_row() {
+  env -u NOCSOC_SERVICE_REGISTRY $PY scripts/validate.py --json --offline \
+      --allow-no-backup --secrets-dir "$SECRETS" "$@" 2>/dev/null \
+    | $PY -c 'import json,sys
+d = json.load(sys.stdin)
+for i in d["checks"]:
+    if i["name"] == "service registry source":
+        print("%s|%s" % (i["status"], i["detail"])); break
+else:
+    print("MISSING|row not emitted")'
+}
+
+row="$(reg_row --site "$REGDIR/site.yaml" --rendered-dir "$QA/rendered-empty")"
+case "$row" in
+  warn\|*PLACEHOLDER*) pass "example registry is called out as a placeholder (warn, offline)" ;;
+  *) fail "example registry not flagged offline: $row" ;;
+esac
+
+row="$(reg_row --site "$REGDIR/site.yaml" --rendered-dir "$QA/rendered-real")"
+case "$row" in
+  ok\|*rendered-real/service-registry.yaml*rendered*) pass "rendered registry wins over the shipped example" ;;
+  *) fail "rendered registry not preferred: $row" ;;
+esac
+
+cp "$ROOT/config/service-registry.example.yaml" "$REGDIR/service-registry.yaml"
+row="$(reg_row --site "$REGDIR/site.yaml" --rendered-dir "$QA/rendered-real")"
+case "$row" in
+  ok\|*regcfg/service-registry.yaml*config*) pass "a real registry beside site.yaml wins over rendered/" ;;
+  *) fail "cfgdir registry not preferred over rendered: $row" ;;
+esac
+rm -f "$REGDIR/service-registry.yaml"
+
+# The gate itself: under --require-live, probing placeholders is a FAILURE, not
+# a warn — including when the operator pointed at the example explicitly.
+reg_row_live() {
+  env -u NOCSOC_SERVICE_REGISTRY $PY scripts/validate.py --json --require-live \
+      --allow-no-backup --secrets-dir "$SECRETS" "$@" 2>/dev/null \
+    | $PY -c 'import json,sys
+d = json.load(sys.stdin)
+for i in d["checks"]:
+    if i["name"] == "service registry source":
+        print("%s|%s" % (i["status"], i["detail"])); break
+else:
+    print("MISSING|row not emitted")'
+}
+row="$(reg_row_live --site "$REGDIR/site.yaml" --rendered-dir "$QA/rendered-empty")"
+case "$row" in
+  fail\|*PLACEHOLDER*) pass "--require-live refuses the example registry (fail, not warn)" ;;
+  *) fail "--require-live tolerated the example registry: $row" ;;
+esac
+
+row="$(reg_row_live --site "$REGDIR/site.yaml" --rendered-dir "$QA/rendered-real" \
+        --service-registry "$ROOT/config/service-registry.example.yaml")"
+case "$row" in
+  fail\|*PLACEHOLDER*) pass "--require-live refuses an explicitly-passed example registry" ;;
+  *) fail "explicit example registry tolerated under --require-live: $row" ;;
+esac
 
 # -------------------------------------------------------------------------
 printf '\n'
