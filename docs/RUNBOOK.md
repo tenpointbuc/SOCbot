@@ -187,6 +187,14 @@ admin panels on the LAN — do that only deliberately.
 python3 tooling/lib/config.py validate --site config/site.yaml
 ```
 
+`--site` works on every `config.py` subcommand (`get`, `services`, `known-noise`, …) and may
+go before or after the subcommand. Omit it and the file comes from `$NOCSOC_CONFIG`, else
+`/etc/noc-soc/site.yaml` — which is why the bare form is what you use *after*
+[§7](#7-apply) installs the config to `/etc/noc-soc/`, and `--site` is what you use here,
+while the file still only exists in your clone. The sibling
+`service-registry.yaml` / `known-noise.yaml` are always looked up next to whichever
+`site.yaml` won, so pointing `--site` at a directory points it at the whole config set.
+
 ---
 
 ## 4. Provision secrets

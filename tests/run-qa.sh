@@ -26,6 +26,23 @@ $PY tooling/lib/config.py validate >/dev/null 2>&1 && pass "config.py validate" 
 [ "$($PY tooling/lib/config.py get network.host_ip)" = "192.0.2.13" ] && pass "get scalar" || fail "get scalar"
 [ "$($PY tooling/lib/config.py notifier-topic alerts)" = "2" ] && pass "notifier-topic" || fail "notifier-topic"
 [ -n "$($PY tooling/lib/config.py service immich --field probe)" ] && pass "rich registry probe" || fail "rich registry probe"
+# BUC-18: --site is the documented first-contact form (RUNBOOK §3). It must work
+# both before and after the subcommand, on every subcommand, and must beat
+# $NOCSOC_CONFIG — which is exported above, so these also prove precedence.
+sitedir="$(mktemp -d)"
+sed 's/^  id: example/  id: sitefixture/' config/site.example.yaml > "$sitedir/site.yaml"
+cp config/known-noise.example.yaml "$sitedir/known-noise.yaml"
+$PY tooling/lib/config.py validate --site "$sitedir/site.yaml" 2>/dev/null | grep -q 'site=sitefixture' \
+  && pass "validate --site (post-subcommand, beats \$NOCSOC_CONFIG)" || fail "validate --site"
+$PY tooling/lib/config.py --site "$sitedir/site.yaml" validate 2>/dev/null | grep -q 'site=sitefixture' \
+  && pass "--site validate (pre-subcommand)" || fail "--site before subcommand"
+[ "$($PY tooling/lib/config.py get site.id --site "$sitedir/site.yaml" 2>/dev/null)" = "sitefixture" ] \
+  && pass "get --site" || fail "get --site"
+# with no explicit $NOCSOC_KNOWN_NOISE, the sibling must resolve from the
+# --site dir — the operator's case, where only site.yaml is named on the CLI
+env -u NOCSOC_KNOWN_NOISE "$PY" tooling/lib/config.py known-noise --site "$sitedir/site.yaml" 2>/dev/null | grep -q . \
+  && pass "known-noise --site (sibling follows --site dir)" || fail "known-noise --site"
+rm -rf "$sitedir"
 
 sec "2. grep-clean: no reference-host literals in tooling/ config/ stacks/ ansible/"
 LIT='10\.0\.10\.13|10\.0\.0\.1|10\.0\.20|buckhome\.dev|-1003999471521|/etc/homelab-secrets|\.fortigate\.env|\.restic-password|/opt/HOMELAB|/opt/CLAUDE|immicc_default|buckserver|\bmbadmin\b|RX 5700|FG100F'

@@ -13,11 +13,11 @@ shared loader — never hardcoded.
 | Consumer | Entry point | Notes |
 |---|---|---|
 | Shell scripts / skills | `. tooling/lib/config.sh; nocsoc_load` | exposes `NOCSOC_*` env + helpers (`nocsoc_cfg`, `nocsoc_services`, `nocsoc_notify`, `nocsoc_dns`, `nocsoc_proxy`) |
-| Python | `tooling/lib/config.py <cmd>` | `get`, `env`, `services`, `service`, `notifier-topic`, `known-noise`, `validate` |
+| Python | `tooling/lib/config.py [--site PATH] <cmd>` | `get`, `env`, `services`, `service`, `notifier-topic`, `known-noise`, `validate`; `--site` also accepted after the subcommand |
 | Durable state | `tooling/lib/state.sh` (`nocsoc_state_path`) | per-site dir `<state_dir>/<site-id>/`, **never `/tmp`** |
 
-Config resolution (all env-overridable for CI): `site.yaml` ← `$NOCSOC_CONFIG`
-(else `/etc/noc-soc/site.yaml`); the skill-facing **service registry** ←
+Config resolution (all env-overridable for CI): `site.yaml` ← `--site` (else
+`$NOCSOC_CONFIG`, else `/etc/noc-soc/site.yaml`); the skill-facing **service registry** ←
 `$NOCSOC_SERVICE_REGISTRY` (else `service-registry.yaml`, else the inline
 `services:` block); **known-noise** ← `$NOCSOC_KNOWN_NOISE` (else
 `known-noise.yaml`, else inline `known_noise:`).

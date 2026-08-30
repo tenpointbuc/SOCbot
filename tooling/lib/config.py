@@ -8,13 +8,16 @@ frozen §4 config surface from the BUC-3 design.
 Resolution order (all overridable by env so the same code runs on any host and
 against config/site.example.yaml in CI):
 
-  site.yaml           $NOCSOC_CONFIG            else /etc/noc-soc/site.yaml
+  site.yaml           --site PATH else $NOCSOC_CONFIG else /etc/noc-soc/site.yaml
   service registry    $NOCSOC_SERVICE_REGISTRY else <cfgdir>/service-registry.yaml
                       else the inline `services:` block of site.yaml (§4)
   known-noise         $NOCSOC_KNOWN_NOISE      else <cfgdir>/known-noise.yaml
 
 This module NEVER hardcodes a host/company fact. Every such value comes from the
 config files above.
+
+Every subcommand accepts `--site PATH` (before or after the subcommand), which
+is the same flag bootstrap.sh and scripts/validate.py take.
 
 Subcommands:
   get <dotted.path> [--default V]   print a scalar (JSON for maps/lists)
@@ -51,7 +54,8 @@ def _load_yaml(path):
         with open(path) as fh:
             return yaml.safe_load(fh) or {}
     except FileNotFoundError:
-        _die("config file not found: %s (set NOCSOC_CONFIG)" % path, 4)
+        _die("config file not found: %s (pass --site PATH or set NOCSOC_CONFIG)"
+             % path, 4)
     except Exception as exc:  # malformed YAML
         _die("failed to parse %s: %s" % (path, exc), 5)
 
@@ -289,30 +293,57 @@ def cmd_validate(args):
     sys.stdout.write("ok: %s (site=%s)\n" % (site_path(), dig(site, "site.id")))
 
 
+def _site_opt(parser):
+    """Attach the shared `--site PATH` option.
+
+    Added to the top-level parser *and* every subparser so both
+    `config.py --site X validate` and `config.py validate --site X` work — the
+    latter is the form bootstrap.sh / scripts/validate.py use and the form the
+    runbook documents. `default=SUPPRESS` is what makes the pair safe: without
+    it a subparser would reset `args.site` to None and clobber a value the
+    top-level parser already captured.
+    """
+    parser.add_argument("--site", metavar="PATH", default=argparse.SUPPRESS,
+                        help="site.yaml to read (overrides $NOCSOC_CONFIG; "
+                             "default %s)" % DEFAULT_SITE)
+    return parser
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="config.py")
+    _site_opt(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    g = sub.add_parser("get"); g.add_argument("path"); g.add_argument("--default")
+    def add(name):
+        return _site_opt(sub.add_parser(name))
+
+    g = add("get"); g.add_argument("path"); g.add_argument("--default")
     g.set_defaults(func=cmd_get)
 
-    e = sub.add_parser("env"); e.set_defaults(func=cmd_env)
+    e = add("env"); e.set_defaults(func=cmd_env)
 
-    s = sub.add_parser("services"); s.add_argument("--json", action="store_true")
+    s = add("services"); s.add_argument("--json", action="store_true")
     s.add_argument("--filter", action="append"); s.set_defaults(func=cmd_services)
 
-    sv = sub.add_parser("service"); sv.add_argument("name")
+    sv = add("service"); sv.add_argument("name")
     sv.add_argument("--field"); sv.set_defaults(func=cmd_service)
 
-    nt = sub.add_parser("notifier-topic"); nt.add_argument("name")
+    nt = add("notifier-topic"); nt.add_argument("name")
     nt.set_defaults(func=cmd_notifier_topic)
 
-    kn = sub.add_parser("known-noise"); kn.add_argument("--json", action="store_true")
+    kn = add("known-noise"); kn.add_argument("--json", action="store_true")
     kn.set_defaults(func=cmd_known_noise)
 
-    v = sub.add_parser("validate"); v.set_defaults(func=cmd_validate)
+    v = add("validate"); v.set_defaults(func=cmd_validate)
 
     args = p.parse_args(argv)
+    # --site is plumbed through the env so every resolution path agrees: the
+    # sibling files (service-registry / known-noise) are found relative to the
+    # site file's dir, and modules that import this one (firewall.py,
+    # render.py) see the same source. Same mechanism scripts/validate.py uses.
+    site = getattr(args, "site", None)
+    if site is not None:
+        os.environ["NOCSOC_CONFIG"] = os.path.abspath(site)
     args.func(args)
 
 
