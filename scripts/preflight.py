@@ -141,6 +141,7 @@ def check_secrets(site, manifest, secrets_dir, rep):
                 "keys for enabled modules %s" % ",".join(sorted(modules)))
         return
     required = {}
+    deferred = {}          # BUC-22: stage: postdeploy — reported, never blocking
     for key, spec in secrets.items():
         spec = spec or {}
         mods = set(spec.get("modules", []))
@@ -153,11 +154,18 @@ def check_secrets(site, manifest, secrets_dir, rep):
         if ow and _eval_enablement(site, str(ow)):
             rep.ok("secret %s not required (optional_when: %s)" % (key, ow))
             continue
+        # BUC-22: a `stage: postdeploy` key is minted from a service this bundle
+        # deploys, so it cannot exist at this gate. Name it (so §4's "let
+        # preflight tell you the list" stays true) but never block on it.
+        if str(spec.get("stage", "predeploy")) == "postdeploy":
+            deferred[key] = sorted(mods & modules)
+            continue
         required[key] = sorted(mods & modules)
     if not os.path.isdir(secrets_dir):
         for key in sorted(required):
             rep.err("secret missing: %s (backend dir %s absent) — required by %s"
                     % (key, secrets_dir, ",".join(required[key])))
+        _report_deferred(secrets, deferred, secrets_dir, rep)
         return
     # dir mode: no group/world bits
     dmode = stat.S_IMODE(os.stat(secrets_dir).st_mode)
@@ -176,6 +184,31 @@ def check_secrets(site, manifest, secrets_dir, rep):
             rep.err("secret %s is present but empty" % key)
         else:
             rep.ok("secret present & 600: %s" % key)
+    _report_deferred(secrets, deferred, secrets_dir, rep)
+
+
+def _report_deferred(secrets, deferred, secrets_dir, rep):
+    """BUC-22: surface `stage: postdeploy` keys without blocking the gate. They
+    are minted from a service this bundle deploys, so absence here is expected
+    and normal — but the operator still has to see the name and where it goes.
+    Once the file exists the same mode/emptiness rules apply."""
+    for key in sorted(deferred):
+        spec = (secrets.get(key) or {})
+        path = os.path.join(secrets_dir, key)
+        consumers = ",".join(spec.get("consumers", [])) or "?"
+        if not os.path.exists(path):
+            rep.warn("secret %s not yet provisioned (stage: postdeploy, required "
+                     "by %s for %s) — expected file %s. Mint it AFTER the deploy; "
+                     "this does not block preflight."
+                     % (key, ",".join(deferred[key]), consumers, path))
+            continue
+        fmode = stat.S_IMODE(os.stat(path).st_mode)
+        if fmode & 0o077:
+            rep.err("secret %s mode %o too open (want 600, no group/world)" % (key, fmode))
+        elif os.path.getsize(path) == 0:
+            rep.err("secret %s is present but empty" % key)
+        else:
+            rep.ok("secret present & 600: %s (stage: postdeploy)" % key)
 
 
 def count_pollers(node):

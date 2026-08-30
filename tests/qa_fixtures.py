@@ -4,9 +4,11 @@ the shipped example config + secrets manifest so fixtures never drift from the
 real surface. Used by tests/run-validate-qa.sh.
 
 Subcommands:
-  populate-secrets <dir> [--omit KEY ...]
-      Create a fail-closed-satisfying secrets backend: one 600 file per key in
-      config/secrets.manifest.yaml (dir 700), each with a realistic dummy value.
+  populate-secrets <dir> [--omit KEY ...] [--include-postdeploy]
+      Create a fail-closed-satisfying secrets backend: one 600 file per
+      *pre-deploy* key in config/secrets.manifest.yaml (dir 700), each with a
+      realistic dummy value. `stage: postdeploy` keys are skipped unless
+      --include-postdeploy, since they cannot exist before the deploy.
       --omit drops a key (to exercise the missing-required-secret case).
 
   none-site <out.yaml>
@@ -48,11 +50,20 @@ def dump(obj, out):
         fh.write(y.safe_dump(obj, default_flow_style=False, sort_keys=False))
 
 
-def manifest_keys():
+def manifest_keys(include_postdeploy=False):
+    """Manifest keys. BUC-22: `stage: postdeploy` keys are minted from a service
+    the bundle deploys, so a *pre-deploy* backend fixture must NOT contain them —
+    including them would hide the fact that preflight passes without them."""
     y = _yaml()
     with open(os.path.join(CONFIG, "secrets.manifest.yaml")) as fh:
         doc = y.safe_load(fh) or {}
-    return list((doc.get("secrets") or {}).keys())
+    keys = []
+    for key, spec in ((doc.get("secrets") or {})).items():
+        stage = str((spec or {}).get("stage", "predeploy"))
+        if stage == "postdeploy" and not include_postdeploy:
+            continue
+        keys.append(key)
+    return keys
 
 
 def cmd_populate_secrets(args):
@@ -61,7 +72,7 @@ def cmd_populate_secrets(args):
     os.chmod(d, 0o700)
     omit = set(args.omit or [])
     written = []
-    for key in manifest_keys():
+    for key in manifest_keys(include_postdeploy=args.include_postdeploy):
         if key in omit:
             continue
         p = os.path.join(d, key)
@@ -108,7 +119,11 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ps = sub.add_parser("populate-secrets"); ps.add_argument("dir")
-    ps.add_argument("--omit", action="append"); ps.set_defaults(func=cmd_populate_secrets)
+    ps.add_argument("--omit", action="append")
+    ps.add_argument("--include-postdeploy", action="store_true",
+                    help="also write `stage: postdeploy` keys (default: skip — a "
+                         "pre-deploy backend cannot contain them)")
+    ps.set_defaults(func=cmd_populate_secrets)
 
     ns = sub.add_parser("none-site"); ns.add_argument("out")
     ns.set_defaults(func=cmd_none_site)

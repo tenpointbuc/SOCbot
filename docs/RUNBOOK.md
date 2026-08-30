@@ -224,6 +224,12 @@ Which keys are required is derived from your `site.yaml` (adapters + modules), p
 | `FORTIGATE_API_TOKEN` | `firewall.adapter == fortigate` | |
 | `IMMICH_DB_PASSWORD`, `IMMICH_API_KEY` | `modules.media == true` | |
 
+One key is **not** provisioned here, because it cannot exist yet:
+
+| Key | Stage | Notes |
+|---|---|---|
+| `N8N_API_KEY` | `postdeploy` | Minted from the n8n UI *after* [§7](#7-apply) — see [§8.1.0](#810-prerequisites--tunnel-owner-account-api-key). Preflight lists it as a **warn**, never an error. A warn here is expected on a first deploy; an error means the file exists with the wrong mode or is empty. |
+
 > The four "always" keys are the **irreducible minimum** for the most stripped-down site
 > (`dns=hosts, proxy=none, firewall=none, notifier=stdout, backup=none, all modules off`).
 > Verified by running preflight against that config with an empty secrets dir.
@@ -333,9 +339,82 @@ ssh -o PasswordAuthentication=no <ansible_user>@<host_ip> 'echo still-in'
 
 ### 8.1 n8n workflows and credentials
 
+> `import.py` talks to the **live n8n API**. That API needs a key, and the key only exists
+> once a human has claimed the n8n owner account — which cannot happen before [§7](#7-apply),
+> and cannot be done from the LAN because n8n binds loopback ([§3](#3-author-siteyaml)). Do
+> **8.1.0 first**; the two-line form alone does not work on a fresh host.
+
+#### 8.1.0 Prerequisites — tunnel, owner account, API key
+
+1. **Tunnel to n8n.** n8n publishes on `security.admin_bind`, which defaults to `127.0.0.1`,
+   so it is not reachable from your control node without a tunnel. From the control node:
+
+   ```bash
+   ssh -L 5678:127.0.0.1:5678 <user>@<host>            # leave this running
+   ```
+
+   Then open <http://127.0.0.1:5678> in a browser. (If you set `security.admin_bind` to the
+   host IP deliberately, skip the tunnel and use `http://<host-ip>:5678`.)
+
+2. **Claim the owner account.** n8n's first-run screen asks for an owner email and password.
+   This is a one-time setup no script in this bundle performs, and it is a **race** — the
+   first party to load that page owns the instance. That is exactly why the default bind is
+   loopback. Claim it now, before anything else can. Store the credentials in your password
+   manager; they are not a bundle secret and do not belong in `/etc/noc-soc/secrets`.
+
+3. **Mint an API key.** In n8n: **Settings → n8n API → Create an API key**. Copy it once —
+   n8n does not show it again.
+
+4. **Store the key in the secrets backend** (the same one-file-per-key store as
+   [§4](#4-provision-secrets)), so it is escrowed with everything else instead of living in
+   one operator's shell history:
+
+   ```bash
+   printf '%s' '<the api key>' | sudo tee /etc/noc-soc/secrets/N8N_API_KEY >/dev/null
+   sudo chmod 600 /etc/noc-soc/secrets/N8N_API_KEY
+   ```
+
+   `N8N_API_KEY` is in `config/secrets.manifest.yaml` as `stage: postdeploy` — preflight
+   **names** it, so [§4](#4-provision-secrets)'s "let preflight tell you the list" stays
+   honest, but reports it as a `warn`, never an error, because it cannot exist before the
+   deploy. Seeing that warn at [§6](#6-dry-run--three-gates-in-order) is expected.
+
+5. **Point `import.py` at the tunnel** (only needed when you tunnelled — i.e. the default):
+
+   ```bash
+   export NOCSOC_N8N_URL=http://127.0.0.1:5678
+   ```
+
+   With no override, `import.py` derives the URL from `security.admin_bind` + the service
+   registry, which is correct when you run it **on the target host** and correct through the
+   tunnel too, since both resolve to `127.0.0.1:5678`.
+
+6. **Check every prerequisite at once** — this writes nothing:
+
+   ```bash
+   sudo -E python3 n8n/import.py --preflight
+   ```
+
+   It reports the resolved URL, whether the API key resolves *and authenticates*, and whether
+   every credential value in `n8n/credentials.yaml` resolves — naming the env var and the
+   backend path for anything missing. It never prints a secret value, only its source.
+   Iterate until it is clean, then import.
+
+> **Why `sudo -E`.** Backend files are mode `600` owned by root ([§4](#4-provision-secrets)).
+> `import.py` reads each secret from its env var first (`NOCSOC_N8N_API_KEY` for the API key,
+> `NOCSOC_SECRET_<KEY>` per credential field) and falls back to `/etc/noc-soc/secrets/<KEY>`;
+> that fallback needs read access, and `-E` preserves `NOCSOC_N8N_URL` / `NOCSOC_CONFIG`
+> across the `sudo`. To avoid running it as root, export the values into your own shell
+> instead — today that is `NOCSOC_N8N_API_KEY` and `NOCSOC_SECRET_NOTIFIER_TOKEN` (the field
+> list comes from `n8n/credentials.yaml`) — and drop the `sudo -E`. Do **not** try to source
+> `rendered/site.env` for these: it is the non-secret config surface and deliberately holds no
+> secret values ([B23](VALIDATION.md) asserts exactly that).
+
+#### 8.1.1 Import
+
 ```bash
 python3 n8n/import.py --check                                  # offline validation, no writes
-python3 n8n/import.py                                          # render, provision creds, import, activate
+sudo -E python3 n8n/import.py                                  # render, provision creds, import, activate
 ```
 
 `import.py` renders `n8n/workflows/*.json.j2`, **rejects any `$env.` reference**, strips
@@ -567,6 +646,11 @@ if you meet them cold.
 | `secret missing: <KEY> (required by module <M>)` | Key not in the backend, or wrong filename | Create `<secrets-dir>/<KEY>`, mode 600 ([§4](#4-provision-secrets)) |
 | `secret … mode` / permissions error | File looser than 600 or dir looser than 700 | `sudo chmod 700 <dir>; sudo chmod 600 <dir>/*` |
 | `no SSH public key provisioned while key-only/password-off` | The lockout guard | Provide `security.ssh.authorized_keys` or `--authorized-keys-file`. **Never bypass.** |
+| `secret N8N_API_KEY unavailable: $NOCSOC_N8N_API_KEY is unset and …/N8N_API_KEY is absent` | The n8n API key was never minted, or `import.py` is running before [§8.1.0](#810-prerequisites--tunnel-owner-account-api-key) | Claim the n8n owner account over the tunnel, mint the key in **Settings → n8n API**, write it to `/etc/noc-soc/secrets/N8N_API_KEY` (mode 600), re-run with `sudo -E` |
+| `… is unreadable (Permission denied) — backend files are mode 600` | Reading the backend as a non-owner | `sudo -E python3 n8n/import.py …`, or export the value into your own shell instead ([§8.1.0](#810-prerequisites--tunnel-owner-account-api-key)) |
+| `cannot reach the n8n API at http://127.0.0.1:5678` | No SSH tunnel (n8n binds loopback), or n8n is not up | `ssh -L 5678:127.0.0.1:5678 <user>@<host>` and `export NOCSOC_N8N_URL=http://127.0.0.1:5678`; confirm the container is healthy first |
+| `n8n rejected the API key (HTTP 401)` | Key revoked, mistyped, or minted on a different n8n instance | Re-mint in **Settings → n8n API** and rewrite the backend file. A single trailing newline is *not* the cause — `import.py` strips one `\n` (only that; leading and inner whitespace stay, per [§4](#4-provision-secrets)'s `printf` rule) |
+| `credential '…'.accessToken: secret NOTIFIER_TOKEN unavailable` | The bot token is not in the backend and not exported | It is a [§4](#4-provision-secrets) key — provision it there; `rendered/site.env` never contains it |
 | `two Telegram pollers` / poller rule failure | Two workflows claim `getUpdates`, or one claims it while `poller: false` | One poller per **bot** across all sites ([§8.1](#81-n8n-workflows-and-credentials)) |
 | `token-shaped value in site.yaml` / denylisted key with inline value | A secret value got pasted into config | Move it to the backend; put the key *name* in config |
 | `backup.adapter is none — pass --allow-no-backup` | Deploying without backups | Add `--allow-no-backup` if intended, otherwise configure `restic` |

@@ -90,6 +90,106 @@ if NOCSOC_N8N_WORKFLOW_DIR="$ROOT/tests/fixtures/bad-env" $PY n8n/import.py --ch
 if NOCSOC_N8N_WORKFLOW_DIR="$ROOT/tests/fixtures/two-pollers" $PY n8n/import.py --check >/dev/null 2>&1; then
   fail "did NOT reject two-poller set"; else pass "rejected two-poller set (poller rule)"; fi
 
+sec "4b. BUC-22: import prerequisites are self-diagnosing and never leak a value"
+# A cold operator running --preflight with nothing provisioned must be told the
+# exact env var AND the exact backend path for every missing secret, and exit !=0.
+b22="$(mktemp -d)"; mkdir -p "$b22/secrets"; chmod 700 "$b22/secrets"
+pf_out="$b22/pf.out"
+env -u NOCSOC_N8N_API_KEY -u NOCSOC_SECRET_NOTIFIER_TOKEN \
+  NOCSOC_SECRETS_DIR="$b22/secrets" $PY n8n/import.py --preflight >"$pf_out" 2>&1
+if [ $? -eq 0 ]; then fail "--preflight passed with an empty backend"; else
+  pass "--preflight fails closed with an empty backend"; fi
+grep -q 'NOCSOC_N8N_API_KEY' "$pf_out" && grep -q "$b22/secrets/N8N_API_KEY" "$pf_out" \
+  && pass "names the API-key env var AND its backend path" \
+  || { fail "--preflight did not name both API-key sources"; sed 's/^/      /' "$pf_out"; }
+grep -q 'NOCSOC_SECRET_NOTIFIER_TOKEN' "$pf_out" \
+  && pass "names the per-credential secret env var" || fail "credential secret unnamed"
+# n8n binds security.admin_bind (loopback default) — deriving the LAN IP would
+# send a cold operator at a port that is not listening (BUC-22 root cause).
+url="$($PY -c "import importlib.util as u; s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.n8n_url())" 2>/dev/null)"
+[ "$url" = "http://127.0.0.1:5678" ] \
+  && pass "n8n_url derives admin_bind (loopback), not the LAN IP" \
+  || fail "n8n_url derived '$url', want http://127.0.0.1:5678"
+# backend fallback: value resolves from the 600 file, trailing newline stripped,
+# env still wins, and NO value is ever printed.
+printf '%s\n' 'qa-dummy-key-0f1e2d3c' > "$b22/secrets/N8N_API_KEY"; chmod 600 "$b22/secrets/N8N_API_KEY"
+printf '%s' 'qa-dummy-token-4b5a6978' > "$b22/secrets/NOTIFIER_TOKEN"; chmod 600 "$b22/secrets/NOTIFIER_TOKEN"
+res="$(env -u NOCSOC_N8N_API_KEY NOCSOC_SECRETS_DIR="$b22/secrets" $PY -c "
+import importlib.util as u
+s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m)
+v,src=m.resolve_secret('N8N_API_KEY','NOCSOC_N8N_API_KEY')
+print('%s|%s' % (v, 'backend' if src.startswith('backend') else src))" 2>/dev/null)"
+[ "$res" = "qa-dummy-key-0f1e2d3c|backend" ] \
+  && pass "secret resolves from the backend, trailing newline stripped" \
+  || fail "backend fallback got '$res'"
+res="$(NOCSOC_N8N_API_KEY=from-env NOCSOC_SECRETS_DIR="$b22/secrets" $PY -c "
+import importlib.util as u
+s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m)
+print(m.resolve_secret('N8N_API_KEY','NOCSOC_N8N_API_KEY')[0])" 2>/dev/null)"
+[ "$res" = "from-env" ] && pass "env var beats the backend file" || fail "env precedence got '$res'"
+# the report names sources, never values — the two dummies above must not appear
+env -u NOCSOC_N8N_API_KEY -u NOCSOC_SECRET_NOTIFIER_TOKEN \
+  NOCSOC_SECRETS_DIR="$b22/secrets" $PY n8n/import.py --preflight >"$pf_out" 2>&1
+if grep -q 'qa-dummy-key-0f1e2d3c\|qa-dummy-token-4b5a6978' "$pf_out"; then
+  fail "--preflight PRINTED a secret value"; else pass "--preflight prints sources, never values"; fi
+# with no n8n listening, the reachability failure must name the tunnel remedy
+grep -q 'ssh -L 5678:127.0.0.1:5678' "$pf_out" \
+  && pass "unreachable n8n names the SSH-tunnel remedy" || fail "no tunnel remedy in output"
+# preflight.py: a stage: postdeploy key WARNs when absent (it cannot exist yet)
+# but still ERRs on a loose mode once it does — §4's list stays honest either way.
+res="$($PY -c "
+import importlib.util as u, os, subprocess, sys, yaml
+s=u.spec_from_file_location('pf','scripts/preflight.py'); pf=u.module_from_spec(s); s.loader.exec_module(pf)
+site=yaml.safe_load(open('config/site.example.yaml')); man=yaml.safe_load(open('config/secrets.manifest.yaml'))
+d='$b22/fx'; os.makedirs(d, exist_ok=True); os.chmod(d, 0o700)
+subprocess.run([sys.executable,'tests/qa_fixtures.py','populate-secrets',d],capture_output=True)
+r=pf.Report(); pf.check_secrets(site, man, d, r)
+absent = (not r.errors) and any('N8N_API_KEY' in m for m in r.warnings)
+p=os.path.join(d,'N8N_API_KEY'); open(p,'w').write('x'); os.chmod(p, 0o644)
+r2=pf.Report(); pf.check_secrets(site, man, d, r2)
+loose = any('N8N_API_KEY' in m and 'too open' in m for m in r2.errors)
+print('%s|%s' % (absent, loose))" 2>/dev/null)"
+[ "$res" = "True|True" ] \
+  && pass "postdeploy key: warns when absent, errors when mode is loose" \
+  || fail "postdeploy staging got '$res', want True|True"
+# BUC-22 security review: the three ways the new backend read could be abused in
+# a process §8.1 runs under `sudo -E` (which preserves every NOCSOC_* var).
+printf 'ROOTFILE\n' > "$b22/outside.txt"
+res="$(NOCSOC_SECRETS_DIR="$b22/secrets" $PY -c "
+import importlib.util as u
+s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m)
+out=[]
+for bad_key in ('../outside.txt', '$b22/outside.txt', 'lower_case', 'a/b'):
+    try:
+        m.resolve_secret(bad_key); out.append('READ:'+bad_key)
+    except m.ImportError_ as e:
+        out.append('refused' if 'invalid secrets-backend key name' in str(e) else 'wrong:'+str(e)[:40])
+print(','.join(out))" 2>/dev/null)"
+[ "$res" = "refused,refused,refused,refused" ] \
+  && pass "traversal/absolute/odd key names are refused before any path is built" \
+  || fail "key-name guard got '$res'"
+res="$(NOCSOC_N8N_URL=http://attacker.example:80 NOCSOC_SECRETS_DIR="$b22/secrets" $PY -c "
+import importlib.util as u
+s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m)
+try:
+    print('SENT:'+m.n8n_url())
+except m.ImportError_ as e:
+    print('refused' if 'refusing to send n8n credentials' in str(e) else 'wrong')" 2>/dev/null)"
+[ "$res" = "refused" ] \
+  && pass "\$NOCSOC_N8N_URL cannot aim credentials at a non-admin_bind host" \
+  || fail "url guard got '$res'"
+head -c 32 /dev/urandom > "$b22/secrets/BINARY_KEY"; chmod 600 "$b22/secrets/BINARY_KEY"
+res="$(NOCSOC_SECRETS_DIR="$b22/secrets" $PY -c "
+import importlib.util as u
+s=u.spec_from_file_location('i','n8n/import.py'); m=u.module_from_spec(s); s.loader.exec_module(m)
+got, why = m.secret_source('BINARY_KEY')
+# must not raise, and must not quote the offending byte back at the operator
+print('%s|%s' % (got, 'clean' if ('0x' not in why and 'position' not in why) else 'LEAKY'))" 2>&1)"
+[ "$res" = "False|clean" ] \
+  && pass "non-UTF-8 secret reports cleanly instead of a value-bearing traceback" \
+  || fail "binary-secret handling got '$res'"
+rm -rf "$b22"
+
 sec "5. import.py strips pinData/static data on render"
 tmpout="$(mktemp -d)"
 $PY n8n/import.py --render-only "$tmpout" >/dev/null 2>&1
