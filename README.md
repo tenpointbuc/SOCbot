@@ -24,7 +24,8 @@ have.
 
 ```bash
 git clone <this repo> noc-soc-bundle && cd noc-soc-bundle
-pip install -r requirements.txt
+sudo apt install -y git python3 python3-venv ansible
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt   # PEP 668: no system pip
 ansible-galaxy collection install -r ansible/requirements.yml
 
 cp config/site.example.yaml config/site.yaml && $EDITOR config/site.yaml

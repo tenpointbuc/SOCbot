@@ -78,7 +78,8 @@ def check_schema(site, schema_path, rep):
     try:
         import jsonschema
     except ImportError:
-        rep.err("jsonschema not installed (pip install jsonschema) — cannot validate config")
+        rep.err("jsonschema not installed (RUNBOOK §1.2: python3 -m venv .venv && "
+                "./.venv/bin/pip install -r requirements.txt) — cannot validate config")
         return
     schema = load_yaml(schema_path) if schema_path.endswith((".yaml", ".yml")) else _load_json(schema_path)
     validator = jsonschema.Draft202012Validator(schema)

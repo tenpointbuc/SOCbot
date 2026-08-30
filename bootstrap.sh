@@ -64,11 +64,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-PY="$(command -v python3 || command -v python || true)"
-[ -n "$PY" ] || { echo "bootstrap: python3 not found" >&2; exit 3; }
+# Prefer the bundle's venv over the system interpreter — see scripts/pyenv.sh
+# and RUNBOOK §1.2 (PEP 668 makes a system-wide `pip install` unavailable on
+# Debian 12 / Ubuntu 24.04, so the deps normally live in ./.venv).
+. "$HERE/scripts/pyenv.sh"
+PY="$(nsb_resolve_python "$HERE")" || { echo "bootstrap: no usable python3" >&2; exit 3; }
 
 echo "==> noc-soc-bundle bootstrap"
 echo "    site=$SITE  secrets=$SECRETS_DIR  rendered=$RENDERED  stacks=$STACKS"
+echo "    python=$PY"
 
 # ---- 1) preflight (fail-closed) --------------------------------------------
 if [ "$DO_PREFLIGHT" = 1 ]; then
@@ -92,7 +96,7 @@ echo "==> [2/3] render"
 # ---- 3) ansible bring-up ----------------------------------------------------
 echo "==> [3/3] ansible-playbook site.yml"
 APB="$(command -v ansible-playbook || true)"
-[ -n "$APB" ] || { echo "bootstrap: ansible-playbook not found (pip install ansible; ansible-galaxy collection install -r ansible/requirements.yml)" >&2; exit 4; }
+[ -n "$APB" ] || { echo "bootstrap: ansible-playbook not found (sudo apt install -y ansible; ansible-galaxy collection install -r ansible/requirements.yml — RUNBOOK §1.2)" >&2; exit 4; }
 [ -f "$INVENTORY" ] || { echo "bootstrap: inventory not found: $INVENTORY (copy ansible/inventory.example.ini)" >&2; exit 5; }
 
 apb_args=(-i "$INVENTORY" "$HERE/ansible/site.yml"

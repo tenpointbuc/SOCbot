@@ -17,7 +17,10 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
-PY=python3
+# Same interpreter bootstrap.sh uses — ./.venv when present (RUNBOOK §1.2),
+# system python3 otherwise (CI, or deps installed from apt).
+. "$ROOT/scripts/pyenv.sh"
+PY="$(nsb_resolve_python "$ROOT")" || exit 1
 fails=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fails=$((fails+1)); }
@@ -46,11 +49,13 @@ MISSING=""
 [ "$HAVE_SCHEMA" = 1 ] || MISSING="$MISSING jsonschema"
 if [ -n "$MISSING" ]; then
   if [ "${NSB_QA_STRICT_DEPS:-0}" = "1" ]; then
-    printf '\033[31mmissing Python dependencies:%s\033[0m — pip install -r requirements.txt\n' "$MISSING"
+    printf '\033[31mmissing Python dependencies:%s\033[0m (interpreter: %s)\n' "$MISSING" "$PY"
+    printf '  ./.venv/bin/pip install -r requirements.txt   # RUNBOOK 1.2\n'
     printf 'NSB_QA_STRICT_DEPS=1 requires a complete install; refusing to report a partial run as green.\n'
     exit 1
   fi
-  printf '\033[33mNOTE\033[0m missing Python dependencies:%s (pip install -r requirements.txt).\n' "$MISSING"
+  printf '\033[33mNOTE\033[0m missing Python dependencies:%s using %s\n' "$MISSING" "$PY"
+  printf '     Install: ./.venv/bin/pip install -r requirements.txt (RUNBOOK 1.2).\n'
   printf '     Dependent rows will SKIP. Set NSB_QA_STRICT_DEPS=1 (CI does) to make this fatal.\n'
 fi
 # PyYAML is load-bearing for every row; without it there is nothing to test.

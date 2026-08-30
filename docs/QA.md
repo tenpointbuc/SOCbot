@@ -18,7 +18,12 @@ for the [BUC-6](/BUC/issues/BUC-6) new-company deployment runbook.
 
 ## Dependencies
 
-`pip install -r requirements.txt` before running anything. Jinja2 backs
+`python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt` before
+running anything — *not* a system-wide `pip install`, which Debian 12 and Ubuntu
+24.04 refuse under PEP 668 (`externally-managed-environment`; RUNBOOK §1.2).
+`tests/run-qa.sh` and `tests/run-validate-qa.sh` resolve their interpreter through
+`scripts/pyenv.sh`, so they pick up `./.venv` without it being activated and print
+which interpreter they used when a dep is missing. Jinja2 backs
 `render.py`; jsonschema backs the `preflight.py` schema gate. Both tools **fail
 closed** without them — a deploy never proceeds on an unvalidated config or an
 unrendered stack, so a missing dep looks like a wall of failures rather than an

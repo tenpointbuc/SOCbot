@@ -13,6 +13,7 @@ ansible/inventory.ini
 config/site.yaml
 config/known-noise.yaml
 config/service-registry.yaml
-# python
+# python — .venv is the control-node dep install (RUNBOOK §1.2), never committed
 __pycache__/
 *.pyc
+/.venv/

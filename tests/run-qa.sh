@@ -12,7 +12,10 @@ export NOCSOC_CONFIG="$ROOT/config/site.example.yaml"
 export NOCSOC_SERVICE_REGISTRY="$ROOT/config/service-registry.example.yaml"
 export NOCSOC_KNOWN_NOISE="$ROOT/config/known-noise.example.yaml"
 export NOCSOC_LIB_DIR="$ROOT/tooling/lib"
-PY=python3
+# Same interpreter bootstrap.sh uses — ./.venv when present (RUNBOOK §1.2),
+# system python3 otherwise (CI, or deps installed from apt).
+. "$ROOT/scripts/pyenv.sh"
+PY="$(nsb_resolve_python "$ROOT")" || exit 1
 fails=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fails=$((fails+1)); }

@@ -62,27 +62,68 @@ under `scripts/validate.py --require-live`.
 
 ```bash
 sudo apt update
-sudo apt install -y git python3 python3-pip ansible
+sudo apt install -y git python3 python3-venv ansible
 ```
+
+> **Do not use `pip install` against the system Python.** Debian 12 and Ubuntu 24.04 —
+> including the Debian 12 host this runbook targets in [§1.1](#11-target-host) — ship
+> [PEP 668](https://peps.python.org/pep-0668/), so system `pip` refuses with
+> `error: externally-managed-environment`. On a freshly imaged Debian 12 host `python3 -m pip`
+> is not installed at all. Use the venv below. Do **not** reach for
+> `--break-system-packages`: it writes the bundle's deps into the same `dist-packages` tree
+> `apt` owns, where the next `apt upgrade` of `python3-yaml` or `ansible` can silently
+> overwrite or conflict with them.
 
 Then, from the clone (step 2):
 
 ```bash
-pip install -r requirements.txt                                   # PyYAML, Jinja2, jsonschema
+python3 -m venv .venv                                             # one venv, lives in the clone
+./.venv/bin/pip install -r requirements.txt                       # PyYAML, Jinja2, jsonschema
 ansible-galaxy collection install -r ansible/requirements.yml     # community.docker, ansible.posix, community.general
 ```
+
+`bootstrap.sh` and `tests/run-qa.sh` **find `./.venv` on their own** — you do not have to
+activate it, and forgetting to activate it cannot silently downgrade you to the system
+interpreter. Interpreter precedence is `$NSB_PYTHON` → an activated `$VIRTUAL_ENV` →
+`./.venv` → `python3` on `$PATH` (see `scripts/pyenv.sh`). Activate it (`. .venv/bin/activate`)
+only when you want to run `scripts/preflight.py` or `tooling/lib/config.py` by hand.
 
 `preflight.py` and `render.py` **fail closed** without `jsonschema` / `Jinja2` — a missing dep
 looks like a wall of validation failures, not an install error. If preflight says
 `jsonschema not installed`, you skipped this step; the schema gate is not running and the
 deploy must not proceed.
 
-Verify:
+**Ansible is deliberately *outside* the venv.** `apt install ansible` puts `ansible-playbook`
+on the system interpreter, and `ansible-core` vendors its own Jinja2/PyYAML, so it does not
+need the bundle's venv. The venv holds only the three libraries `preflight.py` / `render.py` /
+`config.py` import. The two never have to agree on an interpreter — which is why nothing in
+[§5](#5-inventory) needs `ansible_python_interpreter` set. If you instead install ansible with
+`pip` *into* `.venv`, you must activate the venv for `ansible-galaxy` and `ansible-playbook`
+too, or `bootstrap.sh` step 3 will not find them.
+
+**Alternative — no venv.** If venvs are off the table for you, install the three deps from
+`apt` instead. Debian 12 ships PyYAML 6.0, Jinja2 3.1.2 and jsonschema 4.10.3, all of which
+satisfy `requirements.txt`:
 
 ```bash
-python3 -c "import yaml, jinja2, jsonschema; print('deps ok')"
+sudo apt install -y python3-yaml python3-jinja2 python3-jsonschema
+```
+
+This puts them on the system interpreter, which `bootstrap.sh` falls back to when there is no
+`./.venv`. The trade-off: you get the distro's versions rather than the pinned ones CI tests,
+and the package names differ outside Debian/Ubuntu. Prefer the venv unless you have a reason.
+
+Verify — run this exactly, from the clone, **without** activating anything:
+
+```bash
+./bootstrap.sh --help >/dev/null && echo 'bootstrap ok'
+"$( . scripts/pyenv.sh; nsb_resolve_python . )" -c "import yaml, jinja2, jsonschema; print('deps ok')"
 ansible --version && ansible-galaxy collection list community.docker
 ```
+
+`deps ok` proves the interpreter `bootstrap.sh` will actually use can import all three. A bare
+`python3 -c "import yaml, jinja2, jsonschema"` does **not** prove that when the deps are in a
+venv — it tests the system interpreter, which is a different Python.
 
 ### 1.3 What you must have decided or obtained first
 
@@ -202,6 +243,11 @@ $EDITOR ansible/inventory.ini
   `ansible_env.USER`, because under `become: true` that resolves to root and keys would land
   on root while your real login account has none.
 - Deploying to the control node itself: `ansible_connection=local`.
+- **No `ansible_python_interpreter` needed**, even though [§1.2](#12-control-node) puts the
+  bundle's deps in a venv. Ansible runs on its own interpreter and vendors its own
+  Jinja2/PyYAML; the venv is only for `preflight.py` / `render.py` / `config.py`. The one case
+  that needs care is installing ansible *with pip into `.venv`* — then activate it before
+  running `bootstrap.sh`.
 - `nsb_site_config` / `nsb_rendered_dir` in `[noc_soc:vars]` are overridden by `bootstrap.sh`;
   leave them unless you are invoking `ansible-playbook` directly (which you should not — see
   [§11](#11-known-warts)).
@@ -382,8 +428,12 @@ if you meet them cold.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `jsonschema not installed … cannot validate config` | Control-node deps missing | `pip install -r requirements.txt` ([§1.2](#12-control-node)). The schema gate is **not** running until you do — do not deploy. |
+| `error: externally-managed-environment` from `pip install` | Debian 12 / Ubuntu 24.04 ship PEP 668; system `pip` will not install into `dist-packages` | Build the venv instead: `python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt` ([§1.2](#12-control-node)). **Do not** pass `--break-system-packages`. |
+| `/usr/bin/python3: No module named pip` | Freshly imaged Debian 12 has no `pip` at all | You do not need it: `sudo apt install -y python3-venv`, then the venv command above ([§1.2](#12-control-node)) |
+| `python3 -m venv` fails with `ensurepip is not available` | `python3-venv` not installed | `sudo apt install -y python3-venv` (Debian splits it out of `python3`) |
+| `jsonschema not installed … cannot validate config` | Control-node deps missing — or a venv that exists but `bootstrap.sh` is not using | `./.venv/bin/pip install -r requirements.txt` ([§1.2](#12-control-node)). Confirm which interpreter is in play: `bootstrap.sh` prints `python=…` on start. The schema gate is **not** running until this clears — do not deploy. |
 | `ModuleNotFoundError: No module named 'jinja2'` from `validate.py`/`render.py` | Same | Same |
+| `NSB_PYTHON is set to '…', which is not executable` | Stale or typo'd interpreter override | `unset NSB_PYTHON` to fall back to `./.venv`, or point it at a real interpreter |
 | `secret missing: <KEY> (required by module <M>)` | Key not in the backend, or wrong filename | Create `<secrets-dir>/<KEY>`, mode 600 ([§4](#4-provision-secrets)) |
 | `secret … mode` / permissions error | File looser than 600 or dir looser than 700 | `sudo chmod 700 <dir>; sudo chmod 600 <dir>/*` |
 | `no SSH public key provisioned while key-only/password-off` | The lockout guard | Provide `security.ssh.authorized_keys` or `--authorized-keys-file`. **Never bypass.** |
@@ -405,7 +455,7 @@ if you meet them cold.
 
 - **Re-run / drift correction:** `./bootstrap.sh --site config/site.yaml`. Idempotent. Run
   `--check` first and read the diff.
-- **Upgrade:** `git fetch && git checkout <new-tag>`, `pip install -r requirements.txt`,
+- **Upgrade:** `git fetch && git checkout <new-tag>`, `./.venv/bin/pip install -r requirements.txt`,
   re-read `VERSION` and the changelog, then `--check` → apply → re-validate ([§9](#9-validate)).
 - **Config change:** edit `site.yaml`, then always go through `bootstrap.sh` so preflight and
   render re-run and the stamp is regenerated.

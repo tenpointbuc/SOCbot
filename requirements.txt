@@ -1,9 +1,15 @@
 # noc-soc-bundle — Python dependencies.
 #
 # Three, deliberately. Everything else in the bundle is stdlib so a fresh host
-# can run the tooling with `apt install python3` plus this file.
+# can run the tooling with `apt install python3 python3-venv` plus this file.
 #
-#   pip install -r requirements.txt
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+#
+# NOT `pip install -r requirements.txt` against the system interpreter: Debian 12
+# and Ubuntu 24.04 ship PEP 668 and refuse it with `externally-managed-environment`
+# (BUC-17). bootstrap.sh and tests/run-*.sh pick up ./.venv automatically — see
+# scripts/pyenv.sh and RUNBOOK §1.2, which also covers the apt-packages alternative.
+# CI installs into the runner's own Python, where PEP 668 does not apply.
 #
 # preflight.py and validate.py FAIL CLOSED when jsonschema/Jinja2 are absent —
 # a deploy is never allowed to proceed on an unvalidated config or an unrendered
