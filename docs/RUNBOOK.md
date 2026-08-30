@@ -296,10 +296,17 @@ Add `--allow-no-backup` if `backup.adapter: none` — a deliberate, logged choic
 **Inspect what render produced before applying:**
 
 ```bash
-ls rendered/
+ls rendered/ rendered/stacks/
 grep -rn 'env_file\|:latest' rendered/ || echo 'clean'      # render already refuses both
-grep -rn '_FILE' rendered/*/docker-compose.yml | head        # secrets ride *_FILE mounts
+grep -rn '_FILE' rendered/stacks/*/docker-compose.yml \
+  || echo 'NO *_FILE MOUNTS — stop, this check found nothing'
 ```
+
+Render writes each compose to `rendered/stacks/<stack>/docker-compose.yml`, so the `_FILE`
+grep must go two levels deep. `rendered/*/docker-compose.yml` matches no file and grep exits
+2 with a `No such file or directory` warning — easy to read past as "no problems found".
+Expect at least one hit per stack that consumes a secret; zero hits means the check did not
+run, not that the stack is clean.
 
 Render fails closed on a bare `:latest` under `security.images.pin`, an `env_file:` in a
 rendered compose, or a token-shaped value inlined into a rendered compose. Secrets must

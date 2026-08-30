@@ -218,9 +218,9 @@ sec "7. BUC-20 soc-weekly-audit.py actually seeds the A13 baseline"
 # the promise end-to-end: the job writes the file validate.py's A13 reads, the score
 # tracks real posture rather than being decorative, and it refuses to invent one.
 aud="$(mktemp -d)"; chmod 700 "$aud"
-mkdir -p "$aud/state/logs" "$aud/secrets" "$aud/rendered/core"
+mkdir -p "$aud/state/logs" "$aud/secrets" "$aud/rendered/stacks/core"
 chmod 700 "$aud/state" "$aud/secrets"
-cat > "$aud/rendered/core/docker-compose.yml" <<'YAML'
+cat > "$aud/rendered/stacks/core/docker-compose.yml" <<'YAML'
 services:
   a: { image: jc21/nginx-proxy-manager:2.11.3 }
   b: { image: louislam/uptime-kuma@sha256:deadbeef }
@@ -254,7 +254,7 @@ esac
 # A degraded host must score strictly lower. A score that ignores posture is worse
 # than no score, because it reads as an all-clear.
 sed -i 's|jc21/nginx-proxy-manager:2.11.3|jc21/nginx-proxy-manager:latest|' \
-  "$aud/rendered/core/docker-compose.yml"
+  "$aud/rendered/stacks/core/docker-compose.yml"
 printf 'Infected files: 2\n' > "$aud/state/logs/soc-clamav-scan.log"
 printf 'Total: 40 (CRITICAL: 5, HIGH: 9)\n' > "$aud/state/logs/soc-trivy-scan.log"
 # shellcheck disable=SC2086
@@ -304,6 +304,48 @@ else
   pass "refuses a config-derived /tmp state dir"
 fi
 rm -rf "$tmpsite" "$aud"
+
+sec "8. BUC-24: doc commands that inspect rendered compose use the real render depth"
+# render.py writes rendered/stacks/<stack>/docker-compose.yml. A one-level
+# rendered/*/docker-compose.yml glob matches no file, and grep's exit 2 is easy to
+# read past as "nothing wrong" — so a doc telling the operator to run it produces a
+# verification they believe happened and did not. Guard the layout and the docs
+# together: if render.py's depth ever changes, this fails and the docs get revisited.
+grep -q 'os.path.join(out_root, "stacks", stack)' scripts/render.py \
+  && pass "render.py still writes rendered/stacks/<stack>/" \
+  || fail "render.py output depth changed — recheck every rendered/ path in docs/"
+
+# Only fenced commands count. Prose that names the bad glob to warn about it (RUNBOOK
+# §6, VALIDATION B22) is the fix, not a regression — matching it would punish the
+# explanation. Table rows are commands too, so scan those alongside ```bash blocks.
+badglob="$(awk '
+  /^```/          { infence = !infence; next }
+  infence         { if ($0 ~ /rendered\/\*\/docker-compose\.yml/) print FILENAME": "FNR": "$0 }
+  /^\|/           { if ($0 ~ /`[^`]*rendered\/\*\/docker-compose\.yml/) print FILENAME": "FNR": "$0 }
+' docs/*.md)"
+if [ -n "$badglob" ]; then
+  fail "docs/ still tell the operator to run the one-level glob: $badglob"
+else
+  pass "no runnable rendered/*/docker-compose.yml glob left in docs/"
+fi
+
+# Prove the claim behaviourally rather than trusting the string match: build the
+# layout render.py produces and show which glob actually reaches the file.
+gd="$(mktemp -d)"
+mkdir -p "$gd/rendered/stacks/core"
+printf 'services:\n  a:\n    environment: [FOO_FILE=/run/secrets/foo]\n' \
+  > "$gd/rendered/stacks/core/docker-compose.yml"
+if (cd "$gd" && grep -rn '_FILE' rendered/*/docker-compose.yml) >/dev/null 2>&1; then
+  fail "one-level glob unexpectedly matched — layout assumption is stale"
+else
+  pass "one-level glob finds nothing against the real layout (the BUC-24 bug)"
+fi
+if (cd "$gd" && grep -rn '_FILE' rendered/stacks/*/docker-compose.yml) >/dev/null 2>&1; then
+  pass "documented glob reaches the rendered compose"
+else
+  fail "documented rendered/stacks/*/ glob does not match render.py output"
+fi
+rm -rf "$gd"
 
 printf '\n'
 if [ "$fails" -eq 0 ]; then printf '\033[32mALL QA CHECKS PASSED\033[0m\n'; exit 0

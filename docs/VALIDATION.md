@@ -113,7 +113,7 @@ rails. Run each by hand and record the evidence.
 | B19 | **DOCKER-USER firewall (IPv6)** | Same over IPv6 | Dropped, unless you deliberately set `network.lan6_cidr`. Default is IPv6 **default-deny** |
 | B20 | **Docker log caps** | `docker inspect <container> -f '{{.HostConfig.LogConfig}}'` | `max-size` / `max-file` match `security.docker_log_caps` |
 | B21 | **Image pinning** | `grep -rn ':latest' rendered/` | No bare `:latest` under `security.images.pin`. Render already refuses this — this confirms what was deployed |
-| B22 | **Secrets ride `*_FILE`** | `grep -rn 'env_file' rendered/` | No hits. Secrets appear as `*_FILE` mount paths only |
+| B22 | **Secrets ride `*_FILE`** | `grep -rn 'env_file' rendered/` then `grep -rn '_FILE' rendered/stacks/*/docker-compose.yml` | First: no hits. Second: **at least one hit per secret-consuming stack** — this is the positive half, and zero hits means the check did not run. Compose lives at `rendered/stacks/<stack>/docker-compose.yml`; a one-level `rendered/*/` glob matches nothing and exits 2 |
 | B23 | **No secret in generated artifacts** | `scripts/secret-scan.py --root . --secrets-dir /etc/noc-soc/secrets --artifact rendered/ --artifact <state_dir>/<site-id> --json` | Clean. This is the **value-based** pass — it greps real backend values against generated output, which CI cannot do. It never prints a secret value |
 | B24 | **n8n `$env` block** | `python3 n8n/import.py --check` | Passes. `N8N_BLOCK_ENV_ACCESS_IN_NODE=true` is set on the container and no workflow references `$env.` |
 | B25 | **Poller uniqueness** | `python3 n8n/import.py --check` | Exactly one `requiresPoller` workflow, consistent with `notifier.telegram.poller`. Across **all sites sharing a bot token**, only one may be true |
