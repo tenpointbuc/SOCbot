@@ -43,6 +43,21 @@ $PY tooling/lib/config.py --site "$sitedir/site.yaml" validate 2>/dev/null | gre
 env -u NOCSOC_KNOWN_NOISE "$PY" tooling/lib/config.py known-noise --site "$sitedir/site.yaml" 2>/dev/null | grep -q . \
   && pass "known-noise --site (sibling follows --site dir)" || fail "known-noise --site"
 rm -rf "$sitedir"
+# BUC-19: nocsoc_load must actually export into the CALLING shell on the derive
+# path (no /etc/noc-soc/site.env — dev/CI, and any host deployed before render
+# installed site.env). A pipeline into the applier would silently return 0 with
+# every NOCSOC_* empty, which is what the skills read. Both cases below matter:
+# derive-path values land, and an explicit env override still beats them.
+loaded="$(env -u NOCSOC_LOADED -u NOCSOC_HOST_IP NOCSOC_ENV=/nonexistent bash -c \
+  '. tooling/lib/config.sh && nocsoc_load && echo "$NOCSOC_HOST_IP"' 2>/dev/null)"
+[ "$loaded" = "192.0.2.13" ] \
+  && pass "nocsoc_load exports into the calling shell (derive path)" \
+  || fail "nocsoc_load derive path exported '$loaded', want 192.0.2.13"
+loaded="$(env -u NOCSOC_LOADED NOCSOC_HOST_IP=10.0.0.9 NOCSOC_ENV=/nonexistent bash -c \
+  '. tooling/lib/config.sh && nocsoc_load && echo "$NOCSOC_HOST_IP"' 2>/dev/null)"
+[ "$loaded" = "10.0.0.9" ] \
+  && pass "nocsoc_load: explicit env still overrides derived config" \
+  || fail "nocsoc_load override got '$loaded', want 10.0.0.9"
 
 sec "2. grep-clean: no reference-host literals in tooling/ config/ stacks/ ansible/"
 LIT='10\.0\.10\.13|10\.0\.0\.1|10\.0\.20|buckhome\.dev|-1003999471521|/etc/homelab-secrets|\.fortigate\.env|\.restic-password|/opt/HOMELAB|/opt/CLAUDE|immicc_default|buckserver|\bmbadmin\b|RX 5700|FG100F'

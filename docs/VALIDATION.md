@@ -41,7 +41,7 @@ on a host it never touched. Exit non-zero on any `fail`.
 | A9 | `backup :: backup dry-run (<adapter>)` | restic can reach and read the repo | `ok`, or `skip` iff `backup.adapter: none` **and** you deployed with `--allow-no-backup` | Check `RESTIC_PASSWORD`, repo path, B2 credentials |
 | A10 | `notifier :: test message dispatch` | A message dispatches **and** is recorded to the durable state dir | `ok` | A `warn` = dispatched but not recorded → the notifier degraded to stdout. Treat as a finding, see B7 |
 | A11 | `soc :: state dir contract` | `<state_dir>/<site-id>/` exists, is writable, is not `/tmp` | `ok` | Create it, chown to the service user |
-| A12 | `soc :: weekly-audit baseline` | `soc/audit-latest.json` exists | `ok` after the audit has run once | `warn` is expected on a **first** pass — seed it ([RUNBOOK §8.2](RUNBOOK.md#82-seed-the-soc-baseline)) and re-run. A `warn` on the second pass is a finding |
+| A12 | `soc :: weekly-audit baseline` | `soc/audit-latest.json` exists | `ok` after the audit has run once | `warn` is expected on a **first** pass. ⚠️ It currently stays `warn` — no shipped job produces the audit, see [RUNBOOK §8.2](RUNBOOK.md#82-seed-the-soc-baseline) and B11. Carry it as a known finding; do not hand-write the baseline |
 
 > **Adapter-fallback note.** A fully-`none` site (`firewall=none, dns=hosts, proxy=none,
 > notifier=stdout, backup=none`) is a supported, CI-tested configuration and still keeps the
@@ -55,13 +55,21 @@ on a host it never touched. Exit non-zero on any `fail`.
 `validate.py` proves the plumbing. Part B proves the operator-facing flows and the security
 rails. Run each by hand and record the evidence.
 
+> **Seven rows need a skill — install them first.** B1, B2, B3, B8, B9, B10 and B12 are run by
+> an **agent runtime**, not by a command. Nothing in the deploy installs the skills, and each
+> of those rows below links to the exact install step, prerequisites, and invocation in
+> [RUNBOOK §8.4](RUNBOOK.md#84-install-and-invoke-the-nocsoc-skills). Do that section once
+> before you start Part B. **No agent runtime is a supported outcome:** mark those seven
+> `SKIP` with that reason (§8.4, *If you have no agent runtime*) — the other 25 rows,
+> including every security rail, are unaffected.
+
 ### NOC flows
 
 | # | Check | How to run it | Pass condition |
 |---|---|---|---|
-| B1 | **Health check flow** | Run the `noc-health` skill | Produces a one-glance verdict covering containers, endpoints, DNS, tunnel, WAN, backups, disk/RAM. Every service comes from the registry — nothing hardcoded. Firewall section says "skipped (adapter=none)" iff that is your config |
-| B2 | **Capacity flow** | Run `noc-capacity` twice, ~a day apart (or seed the history file) | First run creates `noc/capacity-history.jsonl`; second run computes growth and a runway estimate against it |
-| B3 | **Incident flow** | Stop one non-critical container, then run `noc-incident` naming it | It identifies the failing layer, restarts the container (allowed), and re-verifies the endpoint. Confirm the container is back `running` |
+| B1 | **Health check flow** | Run the `noc-health` skill — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Produces a one-glance verdict covering containers, endpoints, DNS, tunnel, WAN, backups, disk/RAM. Every service comes from the registry — nothing hardcoded. Firewall section says "skipped (adapter=none)" iff that is your config |
+| B2 | **Capacity flow** | Run the `noc-capacity` skill twice, ~a day apart (or seed the history file) — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | First run creates `noc/capacity-history.jsonl`; second run computes growth and a runway estimate against it |
+| B3 | **Incident flow** | Stop one non-critical container, then run the `noc-incident` skill naming it — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | It identifies the failing layer, restarts the container (allowed), and re-verifies the endpoint. Confirm the container is back `running` |
 | B4 | **Watchdog / alerting** | Same induced failure as B3 | The infrastructure-watchdog workflow fires and a notification arrives on the configured channel |
 | B5 | **Restart path through socket-proxy** | `POST /containers/<name>/restart` and `POST /containers/create` via socket-proxy | **restart is non-403** (204) **and create is 403**. If restart is 403 the image is wrong — **do not set `POST=1`**, that opens a container-to-host-root path ([RUNBOOK §11](RUNBOOK.md#11-known-warts)) |
 | B6 | **Morning digest** | Wait for or trigger the digest workflow | Digest delivers with real data from this site |
@@ -71,11 +79,11 @@ rails. Run each by hand and record the evidence.
 
 | # | Check | How to run it | Pass condition |
 |---|---|---|---|
-| B8 | **Triage flow** | Run `soc-triage` | Reads the known-noise registry, walks SOC event log / auth / Falco / containers / firewall, and emits a severity-ordered verdict. Creates `soc/triage-last.json` as the cursor |
-| B9 | **Triage cursor** | Run `soc-triage` a second time | Only new events since the cursor are reported — the cursor advanced |
-| B10 | **Investigation flow** | Run `soc-investigate` against a real line from `soc/event-log.md` | Builds a timeline across sources, correlates against known-noise, ends in ✅ / 🟡 / 🔴 with concrete next evidence. Read-only — nothing was changed |
-| B11 | **Weekly audit** | Run the weekly audit once | `soc/audit-latest.json` written; `logs/soc-weekly-audit.log` populated. This also clears A12 |
-| B12 | **Weekly interpretation** | Run `soc-weekly` | Explains the score, separates structural from actionable deductions, gives top-3 operator-executable actions |
+| B8 | **Triage flow** | Run the `soc-triage` skill — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Reads the known-noise registry, walks SOC event log / auth / Falco / containers / firewall, and emits a severity-ordered verdict. Creates `soc/triage-last.json` as the cursor |
+| B9 | **Triage cursor** | Run the `soc-triage` skill a second time — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Only new events since the cursor are reported — the cursor advanced |
+| B10 | **Investigation flow** | Run the `soc-investigate` skill against a real line from `soc/event-log.md` — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each) | Builds a timeline across sources, correlates against known-noise, ends in ✅ / 🟡 / 🔴 with concrete next evidence. Read-only — nothing was changed |
+| B11 | **Weekly audit** | ⚠️ **Not runnable from this bundle.** `schedule.soc_weekly` has no consumer — no unit, no workflow, no script produces the audit ([RUNBOOK §8.4.4](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each)) | `soc/audit-latest.json` written; `logs/soc-weekly-audit.log` populated; this also clears A12. **Until the job ships, record FAIL (gap: no shipped weekly-audit job).** Do not hand-write the file |
+| B12 | **Weekly interpretation** | Run the `soc-weekly` skill — [invocation](RUNBOOK.md#844-the-six-skills-and-how-to-invoke-each). **Blocked on B11** — it interprets an audit result, it does not produce one | Explains the score, separates structural from actionable deductions, gives top-3 operator-executable actions |
 | B13 | **Known-noise suppression** | `python3 tooling/lib/config.py known-noise` | Returns your site's registry, and B8's output actually suppressed the entries in it |
 | B14 | **Redaction** | Review all Part B output | No secret value, no token-bearing URL appears in any output or log |
 

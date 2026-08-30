@@ -59,7 +59,12 @@ nocsoc_load() {
   else
     local py; py="$(_nocsoc_py)"
     if [ -z "$py" ]; then echo "nocsoc: python3 not found and no $NOCSOC_ENV" >&2; return 3; fi
-    "$py" "$NOCSOC_LIB_DIR/config.py" env | _nocsoc_apply || return $?
+    # NOT a pipeline: bash runs the last stage of a pipeline in a subshell, so
+    # `config.py env | _nocsoc_apply` would export into a child and return 0 with
+    # every NOCSOC_* still empty. Capture first, then feed by redirect.
+    local derived
+    derived="$("$py" "$NOCSOC_LIB_DIR/config.py" env)" || return $?
+    _nocsoc_apply <<<"$derived"
   fi
   export NOCSOC_LOADED=1
   return 0

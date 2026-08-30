@@ -28,6 +28,8 @@ under `scripts/validate.py --require-live`.
 | **secrets backend** | A directory of one-file-per-key secrets, default `/etc/noc-soc/secrets`, dir `0700` / files `0600`. Secret *values* live only here — never in git, `site.yaml`, or compose. |
 | **rendered artifacts** | `rendered/` — `site.env`, `service-registry.yaml`, `known-noise.yaml`, per-stack `docker-compose.yml`, and `.render-stamp`. Generated; never hand-edited. |
 | **adapter** | A swappable vendor integration (dns / proxy / firewall / notifier / backup). Every layer has a `none`/degraded option so the core loop survives without that vendor. |
+| **skill** | A written operating procedure — `tooling/skills/<name>/SKILL.md` — that an **agent runtime** reads and carries out against this host. Not a program: you do not execute a skill, you ask an agent to run it by name. The bundle ships six ([§8.4](#84-install-and-invoke-the-nocsoc-skills)). |
+| **agent runtime** | The AI coding agent that reads a skill and runs its commands — [Claude Code](https://docs.claude.com/en/docs/claude-code), whose `SKILL.md` format the bundle ships. **Optional:** the deploy, all of Part A, and 25 of the 32 Part B checks need no agent. Seven Part B rows do — [§8.4](#84-install-and-invoke-the-nocsoc-skills). |
 
 ---
 
@@ -351,21 +353,141 @@ If you run a second site against the **same bot token**, only one site may set `
 ### 8.2 Seed the SOC baseline
 
 The weekly-audit baseline does not exist until the audit has run once. Until then
-`validate.py` reports `soc :: weekly-audit baseline` as `warn`. Seed it:
+`validate.py` reports `soc :: weekly-audit baseline` as `warn`. Check for it:
 
 ```bash
-# run the soc-weekly job once (schedule.soc_weekly otherwise runs it on cron)
 ls "$(python3 tooling/lib/config.py get site.state_dir)/$(python3 tooling/lib/config.py get site.id)/soc/"
 ```
 
-Expect `audit-latest.json` to appear. A `warn` here on a first deployment is expected; a
-`warn` on the *second* validation pass is a finding.
+> ⚠️ **Known gap — you cannot seed this from the bundle yet.** `schedule.soc_weekly` in
+> `site.yaml` is a cron expression with **no consumer**: no systemd unit, no n8n workflow and
+> no script in this repo reads it, so nothing produces `soc/audit-latest.json`. On a clean
+> deployment the `ls` above is empty and stays empty. Carry it as a known finding —
+> **A12 `warn`**, **[B11](VALIDATION.md) FAIL (gap: no shipped weekly-audit job)**, **B12
+> blocked on B11** — and do not hand-write the file to make the row go green; a fabricated
+> baseline makes every later `soc-weekly` interpretation wrong. Everything else in Part A and
+> Part B is unaffected by this gap.
+
+If a future release ships the job, the rule is: a `warn` here on a first deployment is
+expected; a `warn` on the *second* validation pass is a finding.
 
 ### 8.3 Notifier smoke test
 
 Send one test message and confirm it is both delivered **and** recorded to the durable state
 dir — the state record is what `validate.py` checks, and a delivered-but-unrecorded message is
 a real finding (the notifier degraded to stdout).
+
+### 8.4 Install and invoke the NOC/SOC skills
+
+Seven [VALIDATION.md](VALIDATION.md) Part B rows — **B1, B2, B3, B8, B9, B10, B12** — are
+phrased "run the `noc-health` skill", "run `soc-triage`". This section is the only place that
+says what that means, and you must do it here: nothing in `./bootstrap.sh` or the ansible play
+installs the skills. They are files in the repo until you put them on the host.
+
+**What a skill is.** Not a program. A skill is a written operating procedure —
+`tooling/skills/<name>/SKILL.md` — in [Claude Code's skill
+format](https://docs.claude.com/en/docs/claude-code/skills): ordered checks, the exact
+commands to run, the report shape, and the rules for what may be changed versus only proposed.
+An **agent runtime** reads it and carries it out. You invoke one by *asking the agent for it by
+name*, not by executing anything. Each skill first loads one of the four *agent definitions* in
+`tooling/agents/` (`noc-engineer.md`, `soc-analyst.md`, …), which carry the persona and the
+change-authority rules — notably that `noc-engineer` may restart an unhealthy container and
+must only **propose** everything else. Install those too; a skill whose agent file is missing
+will run without its safety rails.
+
+> **This is optional, and it is not on the deploy path.** The stack, all of Part A, and 25 of
+> the 32 Part B checks need no agent runtime. If you have none, skip to
+> [*If you have no agent runtime*](#if-you-have-no-agent-runtime) below and record those seven
+> rows accordingly — do not block the deployment on this section.
+
+#### 8.4.1 Prerequisites
+
+| # | Requirement | Why / how to check |
+|---|---|---|
+| 1 | An **agent runtime with shell access to the target host** | The skills run `docker ps`, `dig`, `df`, and read the host state dir. Running the agent on your workstation against a remote host does not satisfy this. Install [Claude Code](https://docs.claude.com/en/docs/claude-code) on the target host, or run it in a session whose shell *is* on the target host. |
+| 2 | **The bundle clone present on the target host** | The skills call `$NOCSOC_LIB_DIR/config.py` and `firewall.py`, which live in `tooling/lib/`. The play does **not** copy `tooling/` to the host. If your control node was a workstation ([§1.2](#12-control-node)), `git clone` the same tag onto the host now — read-only is fine. |
+| 3 | **A readable config** | The play installs `/etc/noc-soc/site.yaml` as `root:root 0640`, so a non-root operator cannot read it (this is deliberate — see B27). Either run the agent's shell as root, or point it at the clone's copy: `export NOCSOC_CONFIG=<bundle>/config/site.yaml`. |
+| 4 | **Python 3 + PyYAML on the host interpreter** | `config.py` imports `yaml`. `python3 -c 'import yaml'` must succeed *for the user the agent runs as*. If your deps are in the clone's `.venv` ([§1.2](#12-control-node)), also `export NSB_PYTHON=<bundle>/.venv/bin/python3`. |
+| 5 | **Docker readable by that user** | `docker ps` must work without an interactive password — the user is in the `docker` group, or the agent runs as root. |
+
+#### 8.4.2 Install the skills and agent definitions
+
+Run **on the target host**, from the clone. `~` is the home of the user the agent runs as — if
+that is root, run this under `sudo -H`.
+
+```bash
+cd <bundle>
+mkdir -p ~/.claude/skills ~/.claude/agents
+cp -r tooling/skills/. ~/.claude/skills/
+cp    tooling/agents/*.md ~/.claude/agents/
+ls ~/.claude/skills          # expect: noc-capacity noc-health noc-incident soc-investigate soc-triage soc-weekly
+ls ~/.claude/agents          # expect: code-reviewer.md noc-engineer.md security-reviewer.md soc-analyst.md
+```
+
+`~/.claude/agents/` is not a matter of taste: the `SKILL.md` files reference that path
+literally. Re-run this copy after every `git pull` — the skills are not symlinked, so a bundle
+upgrade does not update an installed copy.
+
+#### 8.4.3 Export the two variables the skills assume
+
+Every skill opens with `. "$NOCSOC_LIB_DIR/config.sh"; nocsoc_load`, which cannot bootstrap
+itself — `config.sh` is what *exports* `NOCSOC_LIB_DIR`, so the variable has to already be set
+for that first line to resolve. Set it once in the shell the agent uses (and add it to
+`~/.profile` if you want it to survive a new session):
+
+```bash
+export NOCSOC_LIB_DIR=<bundle>/tooling/lib
+export NOCSOC_CONFIG=<bundle>/config/site.yaml   # only if you are not running as root — prereq 3
+```
+
+Verify the whole chain before you invoke anything. This is the same load every skill does:
+
+```bash
+. "$NOCSOC_LIB_DIR/config.sh" && nocsoc_load && echo "site=$NOCSOC_SITE_ID host=$NOCSOC_HOST_IP"
+python3 "$NOCSOC_LIB_DIR/config.py" services | head
+```
+
+A site id and your host IP, then a service list, means every prerequisite above is satisfied.
+`nocsoc: python3 not found` → prereq 4. A permission error on `site.yaml` → prereq 3.
+
+#### 8.4.4 The six skills and how to invoke each
+
+Open the agent runtime **in the shell you prepared above**, and type the invocation verbatim.
+The skill name is the selector; the rest is the argument the procedure expects.
+
+| Skill | Invocation | Covers |
+|---|---|---|
+| `noc-health` | `Run the noc-health skill` | [B1](VALIDATION.md#part-b--flows-the-automated-gate-cannot-cover) |
+| `noc-capacity` | `Run the noc-capacity skill` | B2 — run it twice, ~a day apart; the first run only creates `noc/capacity-history.jsonl`, the second computes growth against it |
+| `noc-incident` | `Run the noc-incident skill for <container-name>` | B3 — name the container you stopped. This is the one skill permitted to change the host (restart only) |
+| `soc-triage` | `Run the soc-triage skill` (add `for the last <N>h` to widen the window) | B8, B9 — run it twice; the second run must report only events after the `soc/triage-last.json` cursor |
+| `soc-investigate` | `Run the soc-investigate skill on: <paste one line from soc/event-log.md>` | B10 — read-only; it must change nothing |
+| `soc-weekly` | `Run the soc-weekly skill` | B12 — **interpretation only.** It reads a weekly-audit result, it does not produce one; B11 must be satisfied first |
+
+Two things to know before you record a result:
+
+- **`soc-weekly` needs B11's output and the bundle does not yet ship the job that produces
+  it.** `schedule.soc_weekly` in `site.yaml` is a cron expression with no consumer in this
+  bundle — no unit, no n8n workflow, no script reads it. So `soc/audit-latest.json` and
+  `logs/soc-weekly-audit.log` do not appear on their own. Until that job ships, record **B11
+  as FAIL (gap: no shipped weekly-audit job)** and **B12 as BLOCKED on B11**, and note that
+  A12 stays `warn` for the same reason — [§8.2](#82-seed-the-soc-baseline) cannot actually
+  seed it. Do not paper over this by hand-writing the file.
+- **`noc-incident` restarts things.** It is the only skill with change authority, and B3 asks
+  you to induce the failure it repairs. Do that on a container you have chosen to be
+  non-critical, not on the proxy or the tunnel.
+
+#### If you have no agent runtime
+
+This is a supported outcome. Record it once, in the sign-off notes, as *"no agent runtime on
+this host"* and mark the seven rows **SKIP** with that reason. What you give up is explicit:
+B1's one-glance verdict, B2's capacity trend, B3's guided incident walk, B8–B10's triage and
+investigation, B12's weekly interpretation. What you keep is the whole automated gate and
+every security rail — Part A, B4–B7, B11, B13–B32 are unaffected.
+
+If you want coverage without an agent, the skills are readable procedures: `SKILL.md` lists
+the concrete commands in order, and you can work them by hand. That is slower and produces no
+verdict, so record it as a manual pass with your own notes attached, not as a skill run.
 
 ---
 
