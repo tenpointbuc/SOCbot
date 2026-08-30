@@ -524,7 +524,8 @@ def check_soc_baseline(cl, cfg, args):
               "audit-latest.json present" + (" (score=%s)" % score if score is not None else ""))
     else:
         cl.warn(g, "weekly-audit baseline",
-                "no audit-latest.json yet — run soc-weekly once to seed the baseline")
+                "no audit-latest.json yet — run scripts/soc-weekly-audit.py once "
+                "to seed the baseline (RUNBOOK §8.2)")
 
 
 # --- main ------------------------------------------------------------------

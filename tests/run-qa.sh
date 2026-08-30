@@ -213,6 +213,98 @@ while IFS='|' read -r status rest; do
   esac
 done < <($PY tests/hardening_checks.py)
 
+sec "7. BUC-20 soc-weekly-audit.py actually seeds the A13 baseline"
+# RUNBOOK §8.2 promises a command that produces soc/audit-latest.json. These prove
+# the promise end-to-end: the job writes the file validate.py's A13 reads, the score
+# tracks real posture rather than being decorative, and it refuses to invent one.
+aud="$(mktemp -d)"; chmod 700 "$aud"
+mkdir -p "$aud/state/logs" "$aud/secrets" "$aud/rendered/core"
+chmod 700 "$aud/state" "$aud/secrets"
+cat > "$aud/rendered/core/docker-compose.yml" <<'YAML'
+services:
+  a: { image: jc21/nginx-proxy-manager:2.11.3 }
+  b: { image: louislam/uptime-kuma@sha256:deadbeef }
+YAML
+printf 'Infected files: 0\n' > "$aud/state/logs/soc-clamav-scan.log"
+printf 'Total: 3 (CRITICAL: 0, HIGH: 0)\n' > "$aud/state/logs/soc-trivy-scan.log"
+printf 'all tools verified\n' > "$aud/state/logs/soc-tool-integrity.log"
+AUDARGS="--state-dir $aud/state --secrets-dir $aud/secrets --rendered-dir $aud/rendered"
+audit_score() { $PY -c "import json;print(json.load(open('$1'))['score'])" 2>/dev/null; }
+baseline="$aud/state/soc/audit-latest.json"
+
+# shellcheck disable=SC2086
+$PY scripts/soc-weekly-audit.py $AUDARGS >/dev/null 2>&1
+[ -f "$baseline" ] && pass "audit writes soc/audit-latest.json" \
+                   || fail "audit did not write the baseline"
+[ -s "$aud/state/logs/soc-weekly-audit.log" ] \
+  && pass "audit appends logs/soc-weekly-audit.log" || fail "no run log written"
+[ "$(stat -c '%a' "$baseline" 2>/dev/null)" = "600" ] \
+  && pass "baseline is 0600" || fail "baseline mode is not 0600"
+clean_score="$(audit_score "$baseline")"
+
+# validate.py's A13 must flip warn -> ok off the file this job just wrote. That
+# linkage is the whole point of §8.2, so assert it rather than assuming it.
+a13="$(NOCSOC_SITE_STATE_DIR="$aud/state" $PY scripts/validate.py --offline 2>/dev/null \
+        | grep 'weekly-audit baseline')"
+case "$a13" in
+  *present*) pass "validate.py A13 clears after the audit runs" ;;
+  *)         fail "A13 did not clear after seeding: $a13" ;;
+esac
+
+# A degraded host must score strictly lower. A score that ignores posture is worse
+# than no score, because it reads as an all-clear.
+sed -i 's|jc21/nginx-proxy-manager:2.11.3|jc21/nginx-proxy-manager:latest|' \
+  "$aud/rendered/core/docker-compose.yml"
+printf 'Infected files: 2\n' > "$aud/state/logs/soc-clamav-scan.log"
+printf 'Total: 40 (CRITICAL: 5, HIGH: 9)\n' > "$aud/state/logs/soc-trivy-scan.log"
+# shellcheck disable=SC2086
+$PY scripts/soc-weekly-audit.py $AUDARGS >/dev/null 2>&1
+bad_score="$(audit_score "$baseline")"
+if [ -n "$clean_score" ] && [ -n "$bad_score" ] && [ "$clean_score" != "None" ] \
+   && [ "$bad_score" != "None" ] && [ "$bad_score" -lt "$clean_score" ]; then
+  pass "score drops on a degraded host ($clean_score -> $bad_score)"
+else
+  fail "score did not drop on degradation (clean=$clean_score degraded=$bad_score)"
+fi
+$PY -c "
+import json,sys
+d=json.load(open('$baseline'))
+ids={i['id'] for i in d['open_items']}
+sys.exit(0 if {'image_pinning','malware_scan','cve_scan'} <= ids else 1)" 2>/dev/null \
+  && pass "open_items names every degraded component" || fail "open_items missed a finding"
+
+# Refuses to publish a number it cannot support: a bare dir measures almost nothing,
+# and "100" off one lucky check is a fabricated all-clear, which is the exact
+# failure mode A13 exists to prevent.
+bare="$(mktemp -d)"; chmod 700 "$bare"
+sparse="$($PY scripts/soc-weekly-audit.py --state-dir "$bare" --secrets-dir "$bare/none" \
+           --rendered-dir "$bare/none" --json 2>/dev/null \
+          | $PY -c "import json,sys;print(json.load(sys.stdin)['score'])" 2>/dev/null)"
+[ "$sparse" = "None" ] \
+  && pass "score is null below the coverage floor (no fabricated all-clear)" \
+  || fail "low-coverage run published score=$sparse"
+rm -rf "$bare"
+
+# --dry-run must not touch the state dir at all.
+dry="$(mktemp -d)"; chmod 700 "$dry"
+$PY scripts/soc-weekly-audit.py --state-dir "$dry" --dry-run >/dev/null 2>&1
+[ ! -e "$dry/soc/audit-latest.json" ] \
+  && pass "--dry-run writes nothing" || fail "--dry-run wrote the baseline"
+rm -rf "$dry"
+
+# The /tmp rail from state.sh still applies to a config-derived path.
+tmpsite="$(mktemp -d)"
+sed 's|^  state_dir:.*|  state_dir: /tmp/nsb-should-refuse|' config/site.example.yaml \
+  > "$tmpsite/site.yaml"
+cp config/known-noise.example.yaml "$tmpsite/known-noise.yaml"
+if env -u NOCSOC_SITE_STATE_DIR "$PY" scripts/soc-weekly-audit.py \
+     --site "$tmpsite/site.yaml" >/dev/null 2>&1; then
+  fail "accepted a /tmp state dir from config"
+else
+  pass "refuses a config-derived /tmp state dir"
+fi
+rm -rf "$tmpsite" "$aud"
+
 printf '\n'
 if [ "$fails" -eq 0 ]; then printf '\033[32mALL QA CHECKS PASSED\033[0m\n'; exit 0
 else printf '\033[31m%d QA CHECK(S) FAILED\033[0m\n' "$fails"; exit 1; fi

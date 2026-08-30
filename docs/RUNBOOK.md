@@ -432,23 +432,50 @@ If you run a second site against the **same bot token**, only one site may set `
 ### 8.2 Seed the SOC baseline
 
 The weekly-audit baseline does not exist until the audit has run once. Until then
-`validate.py` reports `soc :: weekly-audit baseline` as `warn`. Check for it:
+`validate.py` reports `soc :: weekly-audit baseline` as `warn`. Run the audit once, then
+confirm the file landed:
 
 ```bash
+# run the weekly audit once — this is what schedule.soc_weekly runs on the schedule
+./.venv/bin/python scripts/soc-weekly-audit.py --site /etc/noc-soc/site.yaml
+
+# verification: audit-latest.json is now present
 ls "$(python3 tooling/lib/config.py get site.state_dir)/$(python3 tooling/lib/config.py get site.id)/soc/"
 ```
 
-> ⚠️ **Known gap — you cannot seed this from the bundle yet.** `schedule.soc_weekly` in
-> `site.yaml` is a cron expression with **no consumer**: no systemd unit, no n8n workflow and
-> no script in this repo reads it, so nothing produces `soc/audit-latest.json`. On a clean
-> deployment the `ls` above is empty and stays empty. Carry it as a known finding —
-> **A13 `warn`**, **[B11](VALIDATION.md) FAIL (gap: no shipped weekly-audit job)**, **B12
-> blocked on B11** — and do not hand-write the file to make the row go green; a fabricated
-> baseline makes every later `soc-weekly` interpretation wrong. Everything else in Part A and
-> Part B is unaffected by this gap.
+Add `--dry-run` to see the score without writing anything, and `--json` for the full
+component breakdown. The run appends one line to `logs/soc-weekly-audit.log`; both files are
+what the `soc-weekly` skill reads in [§8.4](#84-install-and-invoke-the-nocsoc-skills).
 
-If a future release ships the job, the rule is: a `warn` here on a first deployment is
-expected; a `warn` on the *second* validation pass is a finding.
+**Reading the result.** The score is a weighted fraction of what the audit could actually
+*measure* on this host. A component with no evidence available — no trivy log, no
+`/etc/docker/daemon.json` — is skipped and leaves the denominator rather than being scored 0
+or assumed clean. The output tells you the coverage:
+
+```
+score: 89/100 (green) from 6 of 9 components (64% of audit weight); 3 skipped
+```
+
+- **`score: n/a`** means under half the audit's weight was measurable. On a *deployed* host
+  that is itself a finding — it means sshd config, the docker daemon or `rendered/` was not
+  where the audit expected it. Investigate before re-running; do not treat `n/a` as a pass.
+- **Scanner components skip on a first pass.** `cve_scan`, `malware_scan` and
+  `tool_integrity` read logs that trivy/ClamAV/the integrity check write. Those scanners are
+  not part of this bundle — if you have not wired them, those three stay `skip` permanently
+  and the score speaks for the six posture checks only. That is expected, not a gap.
+- **Never hand-write `audit-latest.json`.** A fabricated baseline makes every later
+  `soc-weekly` interpretation wrong. If the audit will not produce a file, that is the
+  finding — report it rather than papering over it.
+
+> ⚠️ **Remaining gap — the *schedule* has no consumer.** The audit is runnable on demand (the
+> command above), which is what seeds the baseline and clears A13. But `schedule.soc_weekly`
+> in `site.yaml` is still just a cron expression: this bundle ships **no systemd timer and no
+> n8n workflow** that fires it weekly, so nothing re-runs the audit on its own. Until that
+> ships, either run the command by hand each week or add your own timer/cron entry for it.
+> Record it as a known finding on the deployment.
+
+The rule for A13: a `warn` before you run the command above is expected; a `warn` *after*
+it — or on the second validation pass — is a finding.
 
 ### 8.3 Notifier smoke test
 
@@ -545,13 +572,12 @@ The skill name is the selector; the rest is the argument the procedure expects.
 
 Two things to know before you record a result:
 
-- **`soc-weekly` needs B11's output and the bundle does not yet ship the job that produces
-  it.** `schedule.soc_weekly` in `site.yaml` is a cron expression with no consumer in this
-  bundle — no unit, no n8n workflow, no script reads it. So `soc/audit-latest.json` and
-  `logs/soc-weekly-audit.log` do not appear on their own. Until that job ships, record **B11
-  as FAIL (gap: no shipped weekly-audit job)** and **B12 as BLOCKED on B11**, and note that
-  A13 stays `warn` for the same reason — [§8.2](#82-seed-the-soc-baseline) cannot actually
-  seed it. Do not paper over this by hand-writing the file.
+- **`soc-weekly` interprets B11's output, so run B11 first.** The job that produces it ships
+  as `scripts/soc-weekly-audit.py` — [§8.2](#82-seed-the-soc-baseline) runs it once, which
+  writes `soc/audit-latest.json` and `logs/soc-weekly-audit.log` and clears A13. Neither file
+  appears on its own: `schedule.soc_weekly` is still a cron expression with no timer or
+  workflow firing it, so the weekly cadence is manual until that ships. Run §8.2 before you
+  attempt B12, and do not paper over a missing file by hand-writing one.
 - **`noc-incident` restarts things.** It is the only skill with change authority, and B3 asks
   you to induce the failure it repairs. Do that on a container you have chosen to be
   non-critical, not on the proxy or the tunnel.
